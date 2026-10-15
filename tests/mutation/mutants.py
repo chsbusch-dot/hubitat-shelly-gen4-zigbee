@@ -101,7 +101,9 @@ MUTANTS = {
     "M36": ("the Wi-Fi frames, password included, are kept in state",
             "    state.wifiPending = [network: network]", "    state.wifiPending = [network: network, frames: frames]"),
     "M37": ("Status and IP keep being read after the plug has an address",
-            '            if (text) {\n                state.remove("wifiReadsLeft")', '            if (false) {\n                state.remove("wifiReadsLeft")'),
+            '            if (known) {\n                state.remove("wifiReadsLeft")', '            if (false) {\n                state.remove("wifiReadsLeft")'),
+    "M38": ("a Wi-Fi address of 0.0.0.0 counts as an address",
+            '            boolean known = text && text != "0.0.0.0"', '            boolean known = text as boolean'),
     "M12": ("the hub's firmwareMT is left out of the firmware identity",
             '[build, device.getDataValue("firmwareMT")].findAll', "[build].findAll"),
 }

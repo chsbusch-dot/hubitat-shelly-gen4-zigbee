@@ -771,7 +771,7 @@ check("plug settings: a refused 0006/4003 write (write response or read-back) fa
     deliver(d, frame("0006", "4003", "30", "00", null, "01"))
     d.updated(); d.advance(30_000)
     deliver(d, catchall("0006", "04", ["88", "03", "40"]))             // READ_ONLY
-    expect(d.lastValue("lastSettingsWrite") == "power-on state previous: refused (0006/4003 write: status 0x88; trying RPC)", "${d.events}")
+    expect(d.lastValue("lastSettingsWrite") == "power-on state previous: refused (0006/4003 write: read-only attribute; trying RPC)", "${d.events}")
     expect(d.state.startUpOnOff == false, "4003 no longer used for writing: ${d.state}")
     d.advance(2_000)
     expect(rpcRequests(d) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"initial_state":"restore_last"}}}'], "RPC instead: ${rpcRequests(d)}")
@@ -981,9 +981,10 @@ def wifiFrame = { String command, List data ->
 }
 def wifiAck = { String status = "00" -> wifiFrame("04", [status]) }
 def textBytes = { String s -> s.getBytes("UTF-8").collect { String.format("%02X", it & 0xFF) } }
-def wifiStatusReply = { String status, String ip ->
+def wifiStatusReply = { String status, String ip, String network = null ->
     wifiFrame("01", ["00", "00", "00", "42", String.format("%02X", status.length())] + textBytes(status) +
-                    ["01", "00", "00", "42", String.format("%02X", ip.length())] + textBytes(ip))
+                    ["01", "00", "00", "42", String.format("%02X", ip.length())] + textBytes(ip) +
+                    (network == null ? [] : ["05", "00", "00", "42", String.format("%02X", network.length())] + textBytes(network)))
 }
 /** Every FC02 frame sent so far, as [ZCL command, body]. */
 def wifiSent = { drv ->
@@ -993,10 +994,10 @@ def wifiSent = { drv ->
     }
 }
 
-check("wifi: setWifi sends enable, DHCP and the network, then the password, then Action 1, each after an acknowledgement") {
+check("wifi: setWifi sends enable and the network, then the password, then Action 1, each after an acknowledgement") {
     def d = newDriver()
     d.setWifi("Home Net", "correct horse 42")
-    expect(wifiSent(d) == [["02", "0400" + "10" + "01" + "0300" + "10" + "01" + "0500" + "42" + "08" + hexOfText("Home Net")]], "first write alone: ${wifiSent(d)}")
+    expect(wifiSent(d) == [["02", "0400" + "10" + "01" + "0500" + "42" + "08" + hexOfText("Home Net")]], "first write alone, no DHCP: ${wifiSent(d)}")
     expect(d.sentCommands().every { !it.contains(" 0xFC02 ") || it.startsWith("he raw 0x7257 1 0xEF 0xFC02 {049014") && it.endsWith("} {0xC001}") }, "endpoint EF, Shelly's profile and manufacturer code")
     d.advance(5_000)
     expect(wifiSent(d).size() == 1, "nothing more without an acknowledgement")
@@ -1043,6 +1044,15 @@ check("wifi: an open network sends no password; a bad name or password is not se
     expect(wifiSent(e).isEmpty() && e.state.wifiPending == null && e.eventsNamed("lastSettingsWrite").size() == 4, "nothing sent: ${wifiSent(e)}")
 }
 
+check("recorded: 4613 refused a DHCP write as read-only; a refusal names the attribute and ends the attempt") {
+    // 2026-10-15 11:24 from plug 4613 on 1.3.0, whose first write still carried DHCP (0x0003)
+    def d = newDriver()
+    d.setWifi("Home Net", "correct horse 42")
+    deliver(d, wifiFrame("04", ["88", "03", "00"]))
+    expect(d.lastValue("lastSettingsWrite") == "Wi-Fi Home Net: refused (attribute 0003: read-only attribute)", "${d.events}")
+    expect(d.state.wifiPending == null && driverClass.WIFI_FRAMES.isEmpty() && wifiSent(d).size() == 1, "nothing more sent: ${wifiSent(d)}")
+}
+
 check("wifi: a refused write or no acknowledgement ends the attempt and drops its frames") {
     def d = newDriver()
     d.setWifi("Home Net", "correct horse 42")
@@ -1065,7 +1075,7 @@ check("wifi: Status and IP are read back after Action 1 until the plug has an ad
     3.times { deliver(d, wifiAck()) }
     d.advance(10_000)
     List s = wifiSent(d)
-    expect(s.size() == 5 && s[3] == ["02", "0200" + "20" + "00"] && s[4] == ["00", "0000" + "0100"], "Action 0, then a read of Status and IP: ${s}")
+    expect(s.size() == 5 && s[3] == ["02", "0200" + "20" + "00"] && s[4] == ["00", "0000" + "0100" + "0500"], "Action 0, then a read of Status, IP and SSID: ${s}")
     deliver(d, wifiStatusReply("connecting", ""))
     expect(d.lastValue("wifiStatus") == "connecting" && d.lastValue("wifiIp") == "none" && d.dueAt.wifiRead != null, "${d.events} ${d.dueAt}")
     d.advance(15_000)
@@ -1080,13 +1090,26 @@ check("wifi: Status and IP are read back after Action 1 until the plug has an ad
     expect(wifiSent(e).count { it[0] == "00" } == 4 && e.dueAt.wifiRead == null, "gives up after 4 reads: ${wifiSent(e)}")
 }
 
+check("recorded: 4613 (fw 2.0.0) answers Status connecting, IP 0.0.0.0: no address yet, so the reads go on") {
+    // 2026-10-15 11:22 from plug 4613 on 1.3.0, as the driver decoded it; its SSID attribute was not read yet.
+    def d = newDriver()
+    d.setWifi("Home Net", "")
+    2.times { deliver(d, wifiAck()) }
+    d.advance(10_000)
+    deliver(d, wifiStatusReply("connecting", "0.0.0.0", ""))
+    expect(d.lastValue("wifiStatus") == "connecting" && d.lastValue("wifiIp") == "none" && d.lastValue("wifiNetwork") == "none", "${d.events}")
+    expect(d.dueAt.wifiRead != null, "still reading: ${d.dueAt}")
+    deliver(d, wifiStatusReply("got ip", "192.0.2.44", "Home Net"))       // RFC 5737 documentation address
+    expect(d.lastValue("wifiIp") == "192.0.2.44" && d.lastValue("wifiNetwork") == "Home Net" && d.dueAt.wifiRead == null, "${d.events} ${d.dueAt}")
+}
+
 check("wifi: refresh reads Status and IP while the cluster answers, without Action 0 during a setWifi; unsupported is remembered") {
     def d = newDriver()
     List<String> fc02 = d.refresh().findAll { it.contains(" 0xFC02 ") }
-    expect(fc02.size() == 2 && fc02[0].contains("02" + "0200" + "20" + "00}") && fc02[1].contains("00" + "0000" + "0100}"), "Action 0 then the read: ${fc02}")
+    expect(fc02.size() == 2 && fc02[0].contains("02" + "0200" + "20" + "00}") && fc02[1].contains("00" + "0000" + "0100" + "0500}"), "Action 0 then the read: ${fc02}")
     d.setWifi("Home Net", "correct horse 42")
     fc02 = d.refresh().findAll { it.contains(" 0xFC02 ") }
-    expect(fc02.size() == 1 && fc02[0].contains("0000" + "0100}"), "only the read while setWifi is staging: ${fc02}")
+    expect(fc02.size() == 1 && fc02[0].contains("0000" + "0100" + "0500}"), "only the read while setWifi is staging: ${fc02}")
     def e = newDriver()
     deliver(e, wifiFrame("01", ["00", "00", "86", "01", "00", "86"]))
     expect(e.state.wifiSupported == false && !e.refresh().any { it.contains(" 0xFC02 ") }, "not read again: ${e.state}")
