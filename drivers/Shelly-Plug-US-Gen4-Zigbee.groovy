@@ -38,13 +38,14 @@
  * 1.3.0  2026-10-15  setWifi command, wifiStatus and wifiIp, over Shelly's Wi-Fi setup cluster (WOR-781)
  * 1.3.1  2026-10-15  setWifi no longer writes DHCP (read-only on the plug, which refused the whole setup);
  *                    0.0.0.0 counts as no Wi-Fi address; wifiNetwork shows the network the plug is set to join
+ * 1.3.2  2026-10-15  an RPC reply cut at the key after src (two-digit request id) is judged from its tail (WOR-784)
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.3.1" }
+static String driverVersion() { "1.3.2" }
 
 metadata {
     definition(
@@ -582,11 +583,18 @@ private void handleRpcChunk(String text) {
         state.rpcPending = pending
         return
     }
-    String reply = head + ((pending.tail ?: "") as String)
-    if (reply.contains('"error"') || (head =~ /"src":"[^"]*","e/).find()) {
+    String tail = (pending.tail ?: "") as String
+    String reply = head + tail
+    // The key after src names the outcome, but Hubitat hands over 46 of the first 50 bytes: with a
+    // one-digit request id the opening ends on the r of result, with a two-digit id one character
+    // earlier, on the quote before it (2026-10-15, id 14). Then the tail tells: a SetConfig result
+    // carries restart_required, an error carries its code.
+    boolean refused = reply.contains('"error"') || (head =~ /"src":"[^"]*","e/).find() || tail.contains('"code":')
+    boolean accepted = reply.contains('"result"') || (head =~ /"src":"[^"]*","r/).find() || tail.contains('restart_required')
+    if (refused) {
         def code = reply =~ /"code":(-?\d+)/
         rpcResult("refused", code.find() ? "error ${code.group(1)}" : "error, its code cut off")
-    } else if (reply.contains('"result"') || (head =~ /"src":"[^"]*","r/).find()) {
+    } else if (accepted) {
         rpcResult("accepted", null)
     } else {
         logDebug "RPC reply not judged yet: ${reply}"

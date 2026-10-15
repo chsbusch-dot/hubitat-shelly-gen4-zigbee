@@ -1117,6 +1117,26 @@ check("wifi: refresh reads Status and IP while the cluster answers, without Acti
     expect(e.state.wifiSupported == null && c.any { it.contains(" 0xFC02 ") }, "Configure asks again: ${c}")
 }
 
+check("recorded: 4612's 81-byte success to request id 14, its opening cut on the quote before result, is accepted") {
+    // 2026-10-15 14:02 from plug 4612 (fw 2.0.1): RxCtl 81; RxData 46 of the first 50 bytes, ending in ,"; then the
+    // 31-byte tail lt":{"restart_required":false}}. One more digit in the id than on 2026-10-15 09:36 moves the cut
+    // one character earlier, from the r of result onto the quote. The plug's own id in src is replaced by a made-up one.
+    def d = newDriver(powerLimitWatts: 1800)
+    d.state.rpcId = 13
+    d.updated(); d.advance(32_000)
+    expect(rpcRequests(d)[0].startsWith('{"id":14,'), "${rpcRequests(d)}")
+    deliver(d, rpcReply('{"id":14,"src":"shellyplugusg4-aabbcc000001","', 50))
+    expect(d.state.rpcPending != null && d.lastValue("lastSettingsWrite") == null, "the opening alone names no outcome: ${d.events}")
+    deliver(d, rpcReply('lt":{"restart_required":false}}', 31))
+    expect(d.lastValue("lastSettingsWrite") == "power limit 1800 W: accepted", "${d.events}")
+    def e = newDriver(powerLimitWatts: 1800)                                // an error cut the same way
+    e.state.rpcId = 13
+    e.updated(); e.advance(32_000)
+    deliver(e, rpcReply('{"id":14,"src":"shellyplugusg4-aabbcc000001","', 50))
+    deliver(e, rpcReply('r":{"code":-103,"message":"Missing or bad argum', 50))
+    expect(e.lastValue("lastSettingsWrite") == "power limit 1800 W: refused (error -103)", "${e.events}")
+}
+
 check("plug settings: the RPC id wraps from 99 to 1; Configure forgets what the plug accepted") {
     def d = newDriver(powerLimitWatts: 1500)
     d.state.rpcId = 99
