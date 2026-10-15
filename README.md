@@ -92,12 +92,19 @@ seconds later, one at a time, and only when they differ from what the plug last 
 | `lightLevel` | | `dark`, `twilight` or `bright`, from the plug's light sensor (firmware 2.0.1 and later). |
 | `powerOnState` | | What the plug does after a power cut, when it reports it. |
 | `lastSettingsWrite` | | The outcome of the last plug setting sent: accepted, refused, unconfirmed or not sent. |
+| `bluetooth` | | `on` or `off`, once a setBluetooth command has been accepted. |
 | `powerFactor` | | Only on firmware that offers it; 2.0.1 does not. |
 
 ## Commands
 
-Besides on, off, refresh and configure: **identify** blinks the plug's LED for a few seconds (10 by
-default) so you can find it. It does not touch the relay.
+Besides on, off, refresh and configure:
+
+- **identify** blinks the plug's LED for a few seconds (10 by default) so you can find it.
+- **setBluetooth** turns the plug's Bluetooth on or off. In Zigbee mode the Shelly app reaches the plug
+  only over Bluetooth, for example to give it Wi-Fi so it can update its firmware. The outcome shows in
+  `lastSettingsWrite` and `bluetooth`.
+
+Neither touches the relay.
 
 ## Trips
 

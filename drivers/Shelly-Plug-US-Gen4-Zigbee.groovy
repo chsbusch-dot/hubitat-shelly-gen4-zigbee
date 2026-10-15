@@ -18,8 +18,8 @@
  * Configure never switches the relay. These plugs run space heaters, and the hub's Generic Zigbee
  * Outlet tests the relay with an off/on cycle while configuring.
  *
- * Shelly's RPC channel over Zigbee (cluster 0xFC01) is used only to write two optional settings (power
- * limit, power-on state); readings never depend on it, because Hubitat cuts its replies short.
+ * Shelly's RPC channel over Zigbee (cluster 0xFC01) is used only to write optional settings (power
+ * limit, power-on state, Bluetooth); readings never depend on it, because Hubitat cuts its replies short.
  *
  * The attribute map and the parse structure follow the "Shelly 1PM Gen 4 Zigbee Driver" by joaomf and
  * kkossev (Apache-2.0, https://github.com/joaomf/hubitat). See NOTICE.
@@ -31,13 +31,16 @@
  * 1.0.1  2026-10-15  Health check pings before it marks a plug offline (WOR-777)
  * 1.1.0  2026-10-15  Identify, light level, trip detection, power-on state and power limit settings,
  *                    power factor where offered (WOR-759)
+ * 1.2.0  2026-10-15  setBluetooth command, for the Shelly app (Wi-Fi setup, firmware updates); RPC
+ *                    request chunks wait for the plug's acknowledgement, an unanswered write is asked
+ *                    once more (WOR-780)
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.1.0" }
+static String driverVersion() { "1.2.0" }
 
 metadata {
     definition(
@@ -62,11 +65,14 @@ metadata {
         attribute "powerOnState", "enum", ["off", "on", "toggle", "previous"]
         attribute "lightLevel",   "enum", ["dark", "twilight", "bright"]
         attribute "lastSettingsWrite", "string"
+        attribute "bluetooth",    "enum", ["on", "off"]
         attribute "powerFactor",  "number"
         attribute "tripCount",    "number"
         attribute "lastTrip",     "string"
 
         command "identify", [[name: "seconds", type: "NUMBER", description: "How long the LED blinks (1 to 600, default 10)"]]
+        command "setBluetooth", [[name: "state", type: "ENUM", constraints: ["on", "off"],
+                                  description: "Bluetooth on the plug; the Shelly app needs it for Wi-Fi setup and firmware updates"]]
 
         // As the hub recorded them: joined on firmware 02000021 (no out clusters listed), and the
         // simple descriptor of firmware 2.0.1 (1490-1852-020001FF), which adds Shelly's cluster FC21.
@@ -141,6 +147,7 @@ metadata {
 // still names the request id and whether "result" or "error" follows, which is all a settings write needs.
 @Field static final Integer RPC_POLLS = 6
 @Field static final Integer RPC_CHUNK_BYTES = 40
+@Field static final Integer RPC_ATTEMPTS = 2
 @Field static final Integer POWER_LIMIT_MIN = 100
 @Field static final Integer RPC_TIMEOUT_SECONDS = 25
 @Field static final Map RPC_INITIAL_STATE = ["off": "off", "on": "on", "previous": "restore_last"]   // "keep" is absent: never sent
@@ -340,6 +347,22 @@ void applyPlugSettings() {
     sendRpc("Switch.SetConfig", [id: 0, config: [(key): value]], key, todo[key])
 }
 
+/**
+ * Turns the plug's Bluetooth on or off through Shelly's RPC (BLE.SetConfig); "on" also enables RPC over
+ * Bluetooth, which the Shelly app uses to reach a plug in Zigbee mode (Wi-Fi setup, firmware updates).
+ * The relay is not touched.
+ */
+void setBluetooth(String onOff) {
+    String v = onOff?.toString()?.toLowerCase() == "off" ? "off" : "on"
+    if (state.rpcPending != null || state.startUpPending != null) {
+        settingsOutcome("bluetooth", v, "not sent", "another write is in progress; try again in a minute", false)
+        return
+    }
+    logInfo "turning Bluetooth ${v}"
+    Map config = v == "on" ? [enable: true, rpc: [enable: true]] : [enable: false]
+    sendRpc("BLE.SetConfig", [config: config], "bluetooth", v)
+}
+
 /** Preferences that differ from what the plug accepted, minus those already refused this round. */
 private Map pendingPlugSettings() {
     Map wanted = [:]
@@ -371,14 +394,16 @@ private void startUpRefused(String detail) {
 
 /** Records one setting's outcome and moves on to the next pending setting, if any. */
 private void settingsOutcome(String key, value, String result, String detail, boolean skipOnFail = true) {
-    String what = key == "initial_state" ? "power-on state ${value}" : "power limit ${value} W"
+    String what = key == "initial_state" ? "power-on state ${value}" : (key == "bluetooth" ? "Bluetooth ${value}" : "power limit ${value} W")
     String text = "${what}: ${result}${detail ? ' (' + detail + ')' : ''}"
     if (result == "accepted") {
         state.plugSettings = ((state.plugSettings ?: [:]) as Map) + [(key): value]
+        if (key == "bluetooth") sendEvent(name: "bluetooth", value: value)
         logInfo text
     } else {
         logWarn text
-        if (skipOnFail) state.settingsSkip = ((state.settingsSkip ?: []) as List) + [key]
+        List skip = (state.settingsSkip ?: []) as List
+        if (skipOnFail && !skip.contains(key)) state.settingsSkip = skip + [key]
     }
     sendEvent(name: "lastSettingsWrite", value: text)
     runIn(2, "applyPlugSettings")
@@ -387,22 +412,45 @@ private void settingsOutcome(String key, value, String result, String detail, bo
 /**
  * One RPC request: its length to TxCtl, then its JSON text to TxData in chunks of RPC_CHUNK_BYTES
  * (one Zigbee frame holds about 80 bytes; Zigbee2MQTT writes 40 at a time), then polls for the reply.
+ * Only TxCtl goes out here; rpcWriteAcked sends each chunk once the plug has acknowledged the write before.
  */
-private void sendRpc(String method, Map params, String key, value) {
+private void sendRpc(String method, Map params, String key, value, int attempt = 1) {
     int id = (((state.rpcId ?: 0) as int) % 99) + 1
     state.rpcId = id
     byte[] bytes = JsonOutput.toJson([id: id, method: method, params: params]).getBytes("UTF-8")
-    state.rpcPending = [id: id, polls: 0, key: key, value: value, reply: ""]
-    logDebug "RPC ${method} ${params}"
-    List<String> cmds = [rpcFrame("02", "0100" + "23" + le32(bytes.length))]                     // TxCtl: length
+    List<String> chunks = []
     for (int off = 0; off < bytes.length; off += RPC_CHUNK_BYTES) {
         int n = Math.min(RPC_CHUNK_BYTES, bytes.length - off)
-        cmds << "delay 150"
-        cmds << rpcFrame("02", "0000" + "42" + String.format("%02X", n) + hexOf(bytes, off, n))     // TxData chunk
+        chunks << "0000" + "42" + String.format("%02X", n) + hexOf(bytes, off, n)                    // TxData chunk
     }
-    sendZigbee(cmds)
-    runIn(2, "rpcPoll")
+    state.rpcPending = [id: id, polls: 0, key: key, value: value, reply: "", method: method, params: params, attempt: attempt,
+                        chunks: chunks, sent: 0]
+    logDebug "RPC ${method} ${params}"
     runIn(RPC_TIMEOUT_SECONDS, "rpcTimeout")
+    sendZigbee([rpcFrame("02", "0100" + "23" + le32(bytes.length))])                                // TxCtl: length
+}
+
+/**
+ * The plug acknowledged one write of the request: send the next chunk, or after the last one read the
+ * reply. One chunk at a time, because the plug joins chunks in the order they arrive and the mesh can
+ * reorder frames sent close together: on 2026-10-15 4612 answered chunks sent 150 ms apart with error
+ * -103, the request's id and method intact and its config scrambled. A lost acknowledgement stalls the
+ * request until rpcTimeout asks again.
+ */
+private void rpcWriteAcked() {
+    Map pending = state.rpcPending as Map
+    if (pending?.chunks == null) return
+    List<String> chunks = pending.chunks as List<String>
+    int sent = (pending.sent ?: 0) as int
+    if (sent > chunks.size()) return                                            // a duplicate acknowledgement
+    pending.sent = sent + 1
+    state.rpcPending = pending
+    if (sent < chunks.size()) {
+        sendZigbee([rpcFrame("02", chunks[sent])])
+    } else {
+        runIn(2, "rpcPoll")
+        runIn(RPC_TIMEOUT_SECONDS, "rpcTimeout")                                // the polls get their full time
+    }
 }
 
 /** Reads the reply length and the next reply chunk, a few times until the answer can be judged. */
@@ -416,8 +464,21 @@ void rpcPoll() {
     if (polls < RPC_POLLS) runIn(3, "rpcPoll")
 }
 
+/**
+ * No readable answer: these requests are idempotent (the same setting written twice), so ask once more
+ * before calling it unconfirmed. On 2026-10-15 one of five live writes needed exactly that.
+ */
 void rpcTimeout() {
-    rpcResult("unconfirmed", "no readable answer in ${RPC_TIMEOUT_SECONDS} s; Save Preferences sends it again")
+    Map pending = state.rpcPending as Map
+    if (pending == null) return
+    if (((pending.attempt ?: 1) as int) < RPC_ATTEMPTS) {
+        logDebug "RPC ${pending.method}: no readable answer, asking once more"
+        unschedule("rpcPoll")
+        sendRpc(pending.method as String, pending.params as Map, pending.key as String, pending.value, ((pending.attempt ?: 1) as int) + 1)
+        return
+    }
+    String again = pending.key == "bluetooth" ? "run setBluetooth again" : "Save Preferences sends it again"
+    rpcResult("unconfirmed", "no readable answer in ${RPC_ATTEMPTS} tries; ${again}")
 }
 
 private void rpcResult(String result, String detail) {
@@ -441,7 +502,11 @@ private void parseRpc(Map descMap) {
     String command = (descMap.command as String)?.toUpperCase()
     List<String> d = (descMap.data ?: []) as List<String>
     if (command == "04") {
-        if (d && d[0] != "00") rpcResult("refused", "the plug rejected the request frame: ${zclStatus(d[0])}")
+        if (d && d[0] != "00") {
+            rpcResult("refused", "the plug rejected the request frame: ${zclStatus(d[0])}")
+        } else {
+            rpcWriteAcked()
+        }
         return
     }
     if (command == "0B") {
@@ -465,7 +530,8 @@ private void parseRpc(Map descMap) {
  * of an 80-byte reply reached the driver before its 50-byte opening), so the opening is kept apart from
  * the rest. Hubitat also cuts chunks short (that opening arrived as 46 of 50 bytes, ending in "r), so
  * only the opening is trusted: the request id, then "error" anywhere, or "result" (or the r of it,
- * right after src).
+ * right after src). An error opening is cut the same way: 4612's -103 arrived as ...","e then
+ * ":{"code":-103,... in the next chunk.
  */
 private void handleRpcChunk(String text) {
     Map pending = state.rpcPending as Map
@@ -492,9 +558,9 @@ private void handleRpcChunk(String text) {
         return
     }
     String reply = head + ((pending.tail ?: "") as String)
-    if (reply.contains('"error"')) {
+    if (reply.contains('"error"') || (head =~ /"src":"[^"]*","e/).find()) {
         def code = reply =~ /"code":(-?\d+)/
-        rpcResult("refused", code.find() ? "error ${code.group(1)}" : null)
+        rpcResult("refused", code.find() ? "error ${code.group(1)}" : "error, its code cut off")
     } else if (reply.contains('"result"') || (head =~ /"src":"[^"]*","r/).find()) {
         rpcResult("accepted", null)
     } else {

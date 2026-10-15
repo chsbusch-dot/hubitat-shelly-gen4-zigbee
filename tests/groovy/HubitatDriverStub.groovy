@@ -19,6 +19,7 @@ abstract class HubitatDriverStub extends Script {
     Map<String, Long> dueAt = [:]            // runIn handler -> absolute due time
     Map<String, Integer> periodic = [:]      // runEveryNMinutes handler -> minutes
     MetadataRecorder metadataRecord
+    Closure onHubCommand                     // a simulated device answering what was sent, or null
     FakeDevice device = new FakeDevice()
     FakeZigbee zigbee = new FakeZigbee()
 
@@ -73,6 +74,7 @@ abstract class HubitatDriverStub extends Script {
 
     def sendHubCommand(hubitat.device.HubMultiAction action) {
         hubCommands << action.cmds
+        if (onHubCommand != null) onHubCommand.call(action.cmds)
         null
     }
 
