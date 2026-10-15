@@ -90,6 +90,8 @@ def catchall = { String cluster, String command, List data, String profile = "01
      isManufacturerSpecific: false, manufacturerId: "0000", command: command, direction: "01", data: data]
 }
 def hex = { long v, int digits -> String.format("%0${digits}X", v) }
+/** A power report, so the driver knows the plug's draw (a cutoff below the maximum waits for one). */
+def knownPower = { drv, int w -> deliver(drv, frame("0B04", "050B", "29", hex(w, 4))) }
 
 // Written out here rather than read from the driver, so a wrong attribute id in the driver fails a test.
 def SCALE = [
@@ -776,18 +778,21 @@ check("plug settings: a refused 0006/4003 write (write response or read-back) fa
     d.updated(); d.advance(30_000)
     deliver(d, catchall("0006", "04", ["88", "03", "40"]))             // READ_ONLY
     expect(d.lastValue("lastSettingsWrite") == "power-on state previous: refused (0006/4003 write: read-only attribute; trying RPC)", "${d.events}")
-    expect(d.state.startUpOnOff == false, "4003 no longer used for writing: ${d.state}")
+    expect(d.state.startUpWritable == false, "4003 no longer used for writing: ${d.state}")
+    deliver(d, frame("0006", "4003", "30", "00", null, "01"))           // the queued read-back answers after the refusal
+    expect(d.state.startUpOnOff == true && d.state.startUpWritable == false, "readable, still not writable: ${d.state}")
     d.advance(2_000)
     expect(rpcRequests(d) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"initial_state":"restore_last"}}}'], "RPC instead: ${rpcRequests(d)}")
     def e = newDriver(powerOnState: "on")
     deliver(e, frame("0006", "4003", "30", "00", null, "01"))
     e.updated(); e.advance(30_000)
     deliver(e, frame("0006", "4003", "30", "00", null, "01"))           // read-back still off
-    expect(e.lastValue("lastSettingsWrite") == "power-on state on: refused (0006/4003 still reads off; trying RPC)" && e.state.startUpOnOff == false, "${e.events}")
+    expect(e.lastValue("lastSettingsWrite") == "power-on state on: refused (0006/4003 still reads off; trying RPC)" && e.state.startUpWritable == false, "${e.events}")
 }
 
 check("plug settings: the power limit goes out as RPC Switch.SetConfig in 40-byte TxData chunks") {
     def d = newDriver(powerLimitWatts: 1500)
+    knownPower(d, 0)
     d.state.wifiSupported = false                                       // no FC02 frames: the ZCL sequence numbers below start at 1
     d.updated()
     d.advance(30_000)
@@ -805,6 +810,7 @@ check("plug settings: the power limit goes out as RPC Switch.SetConfig in 40-byt
 
 check("plug settings: a reply that opens with \"result\" is accepted and not sent again") {
     def d = newDriver(powerLimitWatts: 1500)
+    knownPower(d, 0)
     d.updated(); d.advance(32_000)
     // what a plug returned on 2026-10-11: the opening only, then garbage (rxctl 80)
     deliver(d, rpcReply('{"id":1,"src":"shellyplugusg4-aabbcc000001","r' + "ýý", 80))
@@ -817,6 +823,7 @@ check("plug settings: a reply that opens with \"result\" is accepted and not sen
 
 check("plug settings: a reply judged across chunks and key orders") {
     def d = newDriver(powerLimitWatts: 1500)
+    knownPower(d, 0)
     d.updated(); d.advance(32_000)
     chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc0')
     expect(d.state.rpcPending != null, "not judged on half an opening")
@@ -840,6 +847,7 @@ check("recorded: 4612 accepted power_limit 1800, its reply tail arriving before 
 
 check("plug settings: one setting at a time; error, foreign id, default response and silence each end as they should") {
     def d = newDriver(powerLimitWatts: 1500, powerOnState: "previous")
+    knownPower(d, 0)
     d.updated(); d.advance(32_000)
     expect(rpcRequests(d) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"initial_state":"restore_last"}}}'], "only the first setting: ${rpcRequests(d)}")
     chunk(d, '{"id":7,"src":"shellyplugusg4-aabbcc000001","r')
@@ -856,6 +864,7 @@ check("plug settings: one setting at a time; error, foreign id, default response
     d.advance(60_000)
     expect(rpcRequests(d).size() == 2, "refused settings wait for the next Save: ${rpcRequests(d)}")
     def e = newDriver(powerLimitWatts: 1200)
+    knownPower(e, 0)
     e.updated(); e.advance(30_000 + 25_000)
     expect(e.lastValue("lastSettingsWrite") == null && rpcRequests(e).size() == 2, "silence: asked once more first: ${rpcRequests(e)}")
     e.advance(25_000)
@@ -865,6 +874,7 @@ check("plug settings: one setting at a time; error, foreign id, default response
 
 check("plug settings: a second apply while a write is in flight waits for it") {
     def d = newDriver(powerLimitWatts: 1500)
+    knownPower(d, 0)
     d.updated(); d.advance(30_000)
     d.settings.powerLimitWatts = 1400
     d.applyPlugSettings()
@@ -874,6 +884,7 @@ check("plug settings: a second apply while a write is in flight waits for it") {
 check("plug settings: the limit is clamped to 100..1800 W and never set below what the plug is drawing") {
     [[50, 100], [5000, 1800]].each { List io ->
         def d = newDriver(powerLimitWatts: io[0])
+        knownPower(d, 0)
         d.updated(); d.advance(30_000)
         expect(rpcRequests(d) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"power_limit":' + io[1] + '}}}'], "${io}: ${rpcRequests(d)}")
     }
@@ -1036,9 +1047,11 @@ check("wifi: an open network sends no password; a bad name or password is not se
     def d = newDriver()
     d.setWifi("Cafe", "")
     deliver(d, wifiAck())
-    expect(wifiSent(d)[1] == ["02", "0200" + "20" + "01"], "Action 1 right after the network: ${wifiSent(d)}")
+    expect(wifiSent(d)[1] == ["02", "0600" + "42" + "00"], "an empty password, so the plug forgets the old one: ${wifiSent(d)}")
     d.setWifi("Other", "longenough1")
     expect(wifiSent(d).size() == 2 && d.lastValue("lastSettingsWrite") == "Wi-Fi Other: not sent (another Wi-Fi write is in progress; try again in a minute)", "${d.events}")
+    deliver(d, wifiAck())
+    expect(wifiSent(d)[2] == ["02", "0200" + "20" + "01"], "then Action 1: ${wifiSent(d)}")
     deliver(d, wifiAck())
     expect(d.lastValue("lastSettingsWrite").startsWith("Wi-Fi Cafe: accepted"), "the first one still completes: ${d.events}")
     def e = newDriver()
@@ -1092,7 +1105,7 @@ check("wifi: Status and IP are read back after Action 1 until the plug has an ad
     expect(d.dueAt.wifiRead == null && d.state.wifiReadsLeft == null, "no more reads once it has an address: ${d.dueAt}")
     def e = newDriver()
     e.setWifi("Home Net", "")
-    2.times { deliver(e, wifiAck()) }
+    3.times { deliver(e, wifiAck()) }
     e.advance(120_000)
     expect(wifiSent(e).count { it[0] == "00" } == 4 && e.dueAt.wifiRead == null, "gives up after 4 reads: ${wifiSent(e)}")
 }
@@ -1101,7 +1114,7 @@ check("recorded: 4613 (fw 2.0.0) answers Status connecting, IP 0.0.0.0: no addre
     // 2026-10-15 11:22 from plug 4613 on 1.3.0, as the driver decoded it; its SSID attribute was not read yet.
     def d = newDriver()
     d.setWifi("Home Net", "")
-    2.times { deliver(d, wifiAck()) }
+    3.times { deliver(d, wifiAck()) }                                      // network, the empty password, Action 1
     d.advance(10_000)
     deliver(d, wifiStatusReply("connecting", "0.0.0.0", ""))
     expect(d.lastValue("wifiStatus") == "connecting" && d.lastValue("wifiIp") == "none" && d.lastValue("wifiNetwork") == "none", "${d.events}")
@@ -1178,6 +1191,7 @@ check("plug settings: a pending write older than its timeouts is forgotten; a fr
 
 check("plug settings: a chunk before the first poll is ignored; a retry keeps its request id so a late answer counts") {
     def d = newDriver(powerLimitWatts: 1500)
+    knownPower(d, 0)
     d.updated(); d.advance(30_000)                                           // sent and acknowledged, not yet polled
     chunk(d, 'lt":{"restart_required":false}}')
     expect(d.state.rpcPending != null && d.state.rpcPending.tail == null && d.lastValue("lastSettingsWrite") == null, "a repeated tail of an earlier answer is dropped: ${d.state.rpcPending}")
@@ -1219,6 +1233,7 @@ check("decoding: a float, a long string or a bitmap does not hide the attributes
 check("led: the LED preferences go out as one PLUGS_UI.SetConfig after the other settings, and not again once accepted") {
     def d = newDriver(powerLimitWatts: 1500, ledMode: "switch", ledOnColor: "green", ledOffColor: "red", ledBrightness: 50,
                       ledNightMode: "on", ledNightFrom: "22:00", ledNightTo: "06:00", ledNightBrightness: 10)
+    knownPower(d, 0)
     d.updated(); d.advance(32_000)
     expect(rpcRequests(d) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"power_limit":1500}}}'], "the power limit first: ${rpcRequests(d)}")
     chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
@@ -1250,8 +1265,95 @@ check("led: every LED preference at keep sends nothing; a bad night time falls b
     expect(rpcRequests(f) == ['{"id":1,"method":"PLUGS_UI.SetConfig","params":{"config":{"leds":{"mode":"off","night_mode":{"enable":false}}}}}'], "${rpcRequests(f)}")
 }
 
+check("plug settings: a cutoff is not retried once the load rose or the preference moved on, and waits for a power reading") {
+    def d = newDriver(powerLimitWatts: 500)
+    knownPower(d, 100)
+    d.updated(); d.advance(30_000)
+    expect(rpcRequests(d) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"power_limit":500}}}'], "${rpcRequests(d)}")
+    deliver(d, frame("0006", "0000", "10", "01")); knownPower(d, 1500)                       // no answer, and the load rose
+    d.advance(25_000)
+    expect(rpcRequests(d).size() == 1 && d.lastValue("lastSettingsWrite") == "power limit 500 W: not sent (the plug is drawing 1500.0 W and would switch itself off)", "${d.events}")
+    def e = newDriver(powerLimitWatts: 500)
+    knownPower(e, 100)
+    e.updated(); e.advance(30_000)
+    e.settings.remove("powerLimitWatts")                                                     // cleared and saved meanwhile
+    e.advance(25_000)
+    expect(rpcRequests(e).size() == 1 && e.lastValue("lastSettingsWrite") == "power limit 500 W: not sent (the setting changed before the retry)", "${e.events}")
+    def f = newDriver(powerLimitWatts: 500)                                                  // never reported its draw
+    f.updated(); f.advance(30_000)
+    expect(rpcRequests(f).isEmpty() && f.lastValue("lastSettingsWrite") == "power limit 500 W: not sent (the plug has not reported its power draw yet; refresh, then save again)", "${f.events}")
+    def g = newDriver(powerLimitWatts: 1800)                                                 // the maximum cannot undercut a load
+    g.updated(); g.advance(30_000)
+    expect(rpcRequests(g).size() == 1, "${rpcRequests(g)}")
+}
+
+check("wifi: a setup waits 10 s after the last Wi-Fi write and ignores an acknowledgement it did not earn") {
+    def d = newDriver()
+    d.refresh()                                                                              // Action 0 just went out
+    d.setWifi("Home Net", "correct horse 42")
+    expect(!wifiSent(d).any { it[0] == "02" && it[1].startsWith("0400") }, "nothing sent yet: ${wifiSent(d)}")
+    expect(d.dueAt.wifiStart == d.clockMs + 11_000 && d.dueAt.wifiTimeout == d.clockMs + 41_000, "${d.dueAt}")
+    deliver(d, wifiAck())                                                                    // the late answer to Action 0
+    expect(d.state.wifiPending.sent == 0 && !wifiSent(d).any { it[1].startsWith("0400") }, "a stray acknowledgement sends nothing: ${wifiSent(d)}")
+    d.advance(11_000)
+    expect(wifiSent(d).last()[1].startsWith("0400"), "then the setup starts: ${wifiSent(d)}")
+    3.times { deliver(d, wifiAck()) }
+    expect(d.lastValue("lastSettingsWrite").startsWith("Wi-Fi Home Net: accepted"), "${d.events}")
+}
+
+check("configure: a feature the plug reports after the reporting setup ran gets its reporting as well") {
+    def d = newDriver()
+    giveUnits(d, UNITS_020000FF)
+    d.configure()
+    d.advance(8_000)
+    expect(!d.logLines.last().contains("lightLevel"), "not yet known: ${d.logLines.last()}")
+    deliver(d, frame("FC21", "0000", "20", "01", null, "01"))                                // answered 12 s in
+    expect(d.dueAt.applyReporting == d.clockMs + 3_000, "${d.dueAt}")
+    d.advance(3_000)
+    expect(d.logLines.findAll { it.contains("reporting every") }.last().contains("lightLevel"), "${d.logLines}")
+    deliver(d, frame("0B04", "0510", "28", "5F", null, "01"))
+    expect(d.dueAt.applyReporting == d.clockMs + 3_000, "power factor too: ${d.dueAt}")
+}
+
+check("trip: a load that dropped to idle minutes ago is not a trip when a person switches the plug off") {
+    def d = newDriver()
+    giveUnits(d, UNITS_020000FF)
+    d.on(); d.advance(500); deliver(d, frame("0006", "0000", "10", "01"))
+    deliver(d, frame("0B04", "050B", "29", hex(1700, 4)))
+    d.advance(120_000)
+    deliver(d, frame("0B04", "050B", "29", hex(50, 4)))
+    d.advance(300_000)
+    deliver(d, frame("0006", "0000", "10", "00"))
+    expect(d.lastValue("tripCount") == null, "${d.events}")
+    deliver(d, frame("0006", "0000", "10", "01"))
+    deliver(d, frame("0B04", "050B", "29", hex(1700, 4)))
+    d.advance(300_000)
+    deliver(d, frame("0006", "0000", "10", "00"))
+    expect(d.lastValue("tripCount") == 1, "still under load: ${d.events}")
+}
+
+check("firmware: a firmware change probes the optional features again") {
+    def d = newDriver()
+    d.device.data.firmwareMT = "1490-1852-020000FF"
+    giveUnits(d, UNITS_020000FF)
+    deliver(d, frame("0000", "4000", "42", "2.0.1", null, "01"))
+    d.state.lightLevelSupported = false; d.state.powerFactorSupported = false; d.state.wifiSupported = false; d.state.startUpWritable = false
+    d.hubCommands.clear()
+    deliver(d, frame("0000", "4000", "42", "2.2.0", null, "01"))
+    expect(d.state.lightLevelSupported == null && d.state.powerFactorSupported == null && d.state.wifiSupported == null && d.state.startUpWritable == null, "${d.state}")
+    expect(d.sentCommands().any { it.contains("0xFC21") } && d.sentCommands().any { it.contains("0x0B04 0x0510") } && d.sentCommands().any { it.contains(" 0xFC02 ") }, "probed again: ${d.hubCommands}")
+}
+
+check("wifi: a network name with non-ASCII characters reads back as typed") {
+    def d = newDriver()
+    deliver(d, wifiFrame("01", ["00", "00", "00", "42", "06", "67", "6F", "74", "20", "69", "70",
+                                "05", "00", "00", "42", "05", "43", "61", "66", "C3", "A9"]))              // "got ip", "Café"
+    expect(d.lastValue("wifiNetwork") == "Café", "${d.lastValue('wifiNetwork')}")
+}
+
 check("plug settings: the RPC id wraps from 99 to 1; Configure forgets what the plug accepted") {
     def d = newDriver(powerLimitWatts: 1500)
+    knownPower(d, 0)
     d.state.rpcId = 99
     d.updated(); d.advance(32_000)
     expect(rpcRequests(d) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"power_limit":1500}}}'], "${rpcRequests(d)}")
@@ -1297,6 +1399,7 @@ check("trip: a button press long after on at a light load is not a trip; a hub-s
 
 check("trip: an off at 90% of the limit counts even long after on, and the limit follows the preference") {
     def d = newDriver(powerLimitWatts: 1500)
+    knownPower(d, 0)
     giveUnits(d, UNITS_020000FF)
     deliver(d, frame("0006", "0000", "10", "01"))
     deliver(d, frame("0B04", "050B", "29", hex(1400, 4)))
