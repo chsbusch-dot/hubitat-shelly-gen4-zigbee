@@ -1351,6 +1351,39 @@ check("wifi: a network name with non-ASCII characters reads back as typed") {
     expect(d.lastValue("wifiNetwork") == "Café", "${d.lastValue('wifiNetwork')}")
 }
 
+check("trip: a 0 W report right before the off does not hide a protection trip; a drop minutes earlier still clears it") {
+    def d = newDriver()
+    giveUnits(d, UNITS_020000FF)
+    d.on(); d.advance(500); deliver(d, frame("0006", "0000", "10", "01"))
+    deliver(d, frame("0B04", "050B", "29", hex(2000, 4)))
+    d.advance(60_000)                                                                        // past the quick window
+    deliver(d, frame("0B04", "050B", "29", hex(0, 4)))                                       // the plug cut the load
+    d.advance(1_500)
+    deliver(d, frame("0006", "0000", "10", "00"))
+    expect(d.lastValue("tripCount") == 1 && d.lastValue("lastTrip").contains("at up to 2000 W"), "${d.events}")
+    def e = newDriver()
+    giveUnits(e, UNITS_020000FF)
+    e.on(); e.advance(500); deliver(e, frame("0006", "0000", "10", "01"))
+    deliver(e, frame("0B04", "050B", "29", hex(2000, 4)))
+    d.advance(60_000)
+    deliver(e, frame("0B04", "050B", "29", hex(0, 4)))
+    e.advance(120_000)                                                                       // idle for two minutes, then a person
+    deliver(e, frame("0006", "0000", "10", "00"))
+    expect(e.lastValue("tripCount") == null, "${e.events}")
+}
+
+check("wifi: a stale error during the quiet wait does not cancel a setup that has not started") {
+    def d = newDriver()
+    d.refresh()                                                                              // Action 0 just went out
+    d.setWifi("Home Net", "correct horse 42")
+    deliver(d, wifiFrame("04", ["88", "03", "00"]))                                           // a late refusal of that Action 0
+    deliver(d, wifiFrame("0B", ["02", "84"]))                                                 // and a late default response
+    expect(d.state.wifiPending?.network == "Home Net" && d.lastValue("lastSettingsWrite") == null, "still staged: ${d.events}")
+    d.advance(11_000)
+    deliver(d, wifiFrame("04", ["88", "03", "00"]))                                           // now it is about this setup
+    expect(d.lastValue("lastSettingsWrite") == "Wi-Fi Home Net: refused (attribute 0003: read-only attribute)", "${d.events}")
+}
+
 check("plug settings: the RPC id wraps from 99 to 1; Configure forgets what the plug accepted") {
     def d = newDriver(powerLimitWatts: 1500)
     knownPower(d, 0)

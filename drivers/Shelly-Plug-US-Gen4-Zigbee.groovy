@@ -48,13 +48,15 @@
  *                    a feature reported late gets its reporting; a refused power-on write stays on RPC; a trip under
  *                    load uses the recent load; an empty Wi-Fi password clears the old one; a firmware change probes
  *                    the optional features again; network names decode as UTF-8 (WOR-793)
+ * 1.4.2  2026-10-15  a 0 W report right before an off no longer hides a trip; a stale Wi-Fi error no longer cancels a
+ *                    setup that has not started yet (WOR-793)
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.4.1" }
+static String driverVersion() { "1.4.2" }
 
 metadata {
     definition(
@@ -173,8 +175,10 @@ metadata {
 // An off the hub did not send, this soon after an on or at this share of the power limit, is a trip.
 @Field static final Long TRIP_WINDOW_MS = 10000L
 @Field static final BigDecimal TRIP_LOAD_SHARE = 0.9
-// A reading this far below the peak since switch-on ends that high load: 1700 W then minutes at 50 W is idle.
+// A reading this far below the peak since switch-on ends that high load (1700 W, then minutes at 50 W, is idle),
+// unless the plug switches off within the grace time of it: a protection trip reports 0 W right before off.
 @Field static final BigDecimal TRIP_PEAK_DECAY = 0.5
+@Field static final Long TRIP_DROP_GRACE_MS = 15000L
 @Field static final Integer PLUG_MAX_WATTS = 1800
 @Field static final Long RX_STAMP_EVERY_MS = 60000L
 @Field static final Long COMMAND_ECHO_MS = 10000L
@@ -879,7 +883,7 @@ private void parseWifi(Map descMap) {
     List<String> d = (descMap.data ?: []) as List<String>
     if (command == "04") {
         if (d && d[0] != "00") {
-            if (state.wifiPending != null) wifiFinish("refused", "attribute ${d.size() >= 3 ? d[2] + d[1] : '?'}: ${zclStatus(d[0])}")
+            if (wifiSetupActive()) wifiFinish("refused", "attribute ${d.size() >= 3 ? d[2] + d[1] : '?'}: ${zclStatus(d[0])}")
         } else {
             wifiWriteAcked()
         }
@@ -888,7 +892,7 @@ private void parseWifi(Map descMap) {
     if (command == "0B") {
         if (d.size() >= 2 && d[1] != "00") {
             if (d[1] == "C3") state.wifiSupported = false
-            if (state.wifiPending != null) wifiFinish("refused", "the plug answered ${zclStatus(d[1])}")
+            if (wifiSetupActive()) wifiFinish("refused", "the plug answered ${zclStatus(d[1])}")
         }
         return
     }
@@ -921,6 +925,12 @@ private void parseWifi(Map descMap) {
             sendEvent(name: "wifiNetwork", value: v)
         }
     }
+}
+
+/** A setup that has sent at least one frame: only then is a Wi-Fi write response, good or bad, about it. */
+private boolean wifiSetupActive() {
+    Map pending = state.wifiPending as Map
+    return pending != null && ((pending.sent ?: 0) as int) > 0
 }
 
 private String wifiWrite(String records) {
@@ -1031,6 +1041,7 @@ private void handleSwitch(String hex) {
         state.onAtMs = now()
         state.onType = type
         state.peakWatts = 0
+        state.remove("lowSinceMs")
     }
     if (changed && value == "off" && type == "physical") checkTrip()
     sendEvent(name: "switch", value: value, type: type, descriptionText: text)
@@ -1048,7 +1059,8 @@ private void checkTrip() {
     BigDecimal peak = toDecimal(state.peakWatts)
     BigDecimal limit = toDecimal(settings?.powerLimitWatts) > 0 ? toDecimal(settings?.powerLimitWatts) : PLUG_MAX_WATTS
     boolean quick = onAt != null && now() - onAt <= TRIP_WINDOW_MS && (state.onType == "digital" || peak > 0)
-    boolean heavy = peak >= limit * TRIP_LOAD_SHARE
+    Long lowSince = state.lowSinceMs as Long
+    boolean heavy = peak >= limit * TRIP_LOAD_SHARE && (lowSince == null || now() - lowSince <= TRIP_DROP_GRACE_MS)
     if (!quick && !heavy) return
     int count = toDecimal(device.currentValue("tripCount")).intValue() + 1
     String when = quick ? "${Math.round((now() - onAt) / 1000.0)} s after it was switched on" : "under load"
@@ -1073,7 +1085,12 @@ private void handleMeasurement(String q, String hex, String encoding) {
     if (device.currentValue(d.event as String)?.toString() != value.toString()) logInfo text
     if (q == "power" && device.currentValue("switch") == "on") {
         BigDecimal peak = toDecimal(state.peakWatts)
-        if (value > peak || value < peak * TRIP_PEAK_DECAY) state.peakWatts = value
+        if (value > peak) state.peakWatts = value
+        if (value < peak * TRIP_PEAK_DECAY) {
+            if (state.lowSinceMs == null) state.lowSinceMs = now()   // the high load ended here, unless off follows at once
+        } else {
+            state.remove("lowSinceMs")
+        }
     }
     sendEvent(name: d.event, value: value, unit: d.unit, descriptionText: text)
 }
