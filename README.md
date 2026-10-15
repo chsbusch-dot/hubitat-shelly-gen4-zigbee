@@ -1,0 +1,192 @@
+# Shelly Plug US Gen4 (Zigbee) for Hubitat
+
+A Hubitat Elevation driver for the Shelly Plug US Gen4 (model S4PL-00116US) running its Zigbee
+firmware. It switches the plug and reports power, energy, voltage, current and AC frequency. It also
+marks the plug offline when it stops talking.
+
+## Why another driver
+
+Most people run these plugs on the Shelly 1PM Gen 4 Zigbee driver by joaomf and kkossev. That driver
+was written for the 1PM relay. Switching works, but two things go wrong on the plug:
+
+- **Units.** The 1PM driver divides power and current by 100. Plug firmware 020000FF sends power in
+  watts and current in milliamps, so a 1000 W heater shows up as 10 W and 9 A as 90 A. Zigbee has
+  standard attributes where a device states its own multiplier and divisor. This driver reads them and
+  scales every reading with them, so the numbers stay right when a firmware update changes the units.
+- **Bundled reports.** The plug often sends current and power in the same message. A driver that only
+  reads the first value of a message leaves power frozen while current keeps updating. This driver
+  reads every value in the message.
+
+Configure also leaves the relay alone. Hubitat's built-in Generic Zigbee Outlet driver turns the outlet
+off and on again while it configures, which you don't want on a plug that runs a space heater.
+
+## Requirements
+
+- A Hubitat Elevation hub on platform 2.3.0 or later.
+- A Shelly Plug US Gen4 switched to Zigbee mode and paired with the hub.
+
+## Install
+
+**Hubitat Package Manager:** choose Install, then Search by Keywords, and search for
+`Shelly Plug US Gen4`. Or choose Install, then From a URL, and paste:
+
+```
+https://raw.githubusercontent.com/chsbusch-dot/hubitat-shelly-gen4-zigbee/main/packageManifest.json
+```
+
+**By hand:** in Drivers Code, choose New Driver, then Import, paste the URL below and save.
+
+```
+https://raw.githubusercontent.com/chsbusch-dot/hubitat-shelly-gen4-zigbee/main/drivers/Shelly-Plug-US-Gen4-Zigbee.groovy
+```
+
+## Set up a plug
+
+**A plug you pair from now on** gets this driver on its own: the fingerprint matches manufacturer
+`Shelly`, model `Plug US`. The hub runs Configure after pairing.
+
+**A plug that is already paired** (on the 1PM driver, for example):
+
+1. Open the device, set Type to *Shelly Plug US Gen4 (Zigbee)* and click Save Device.
+2. Click Configure. The relay stays as it is.
+3. Wait about half a minute and open the logs. With descriptionText logging on you should see a line
+   like `power units from the plug: x1/1` for each reading. A warning that says the plug "has not
+   reported its units" means the driver is using its built-in defaults (see [Units](#units)).
+
+If you had used the 1PM driver's calibration settings to correct the units (a power calibration of
+9900%, for example), the driver removes them during Configure and logs a warning that names each one.
+Those corrections would make the new readings wrong. The 1PM driver's leftover attributes (`rpcStatus`,
+`rpcResponse`, `producedEnergy`) are deleted as well.
+
+## Settings
+
+| Setting | Default | What it does |
+|---|---|---|
+| Longest time between reports | 600 s | The plug reports at least this often, even when nothing changes. The health check uses it too. |
+| Report power when it changes by | 5 W | How much power has to change before the plug reports it. |
+| Power, voltage, current adjustment | 0 % | Leave at 0 unless your readings are off against a meter you trust. 2 reads 2% higher. |
+| AC frequency offset | 0 Hz | Added to every frequency reading. |
+| After a power cut, the plug turns | keep | Off, on, or back to how it was. "Keep" leaves the plug's own setting alone. Pick "on" only if you want a heater to come back by itself. |
+| Switch off above | empty | The plug's own overpower cutoff, 100 to 1800 W. Empty leaves the plug's setting alone. |
+| descriptionText logging | on | One log line per reading. |
+| Debug logging | off | Raw Zigbee messages. Turns itself off after 30 minutes. |
+
+Saving the settings sends the new reporting setup to the plug. The two plug settings go out about 30
+seconds later, one at a time, and only when they differ from what the plug last accepted (see
+[Plug settings](#plug-settings)).
+
+## Attributes
+
+| Attribute | Unit | Notes |
+|---|---|---|
+| `switch` | | `on` or `off`. Type is `digital` when it follows a command from the hub, `physical` for the button on the plug. |
+| `power` | W | |
+| `energy` | kWh | The plug's own counter. |
+| `voltage` | V | |
+| `amperage` | A | |
+| `acFrequency` | Hz | |
+| `healthStatus` | | `online`, `offline` or `unknown`. |
+| `checkInterval` | s | How long the plug may stay silent before it counts as offline. |
+| `tripCount` | | How often the plug switched itself off (see [Trips](#trips)). |
+| `lastTrip` | | When and at what load it last did. |
+| `lightLevel` | | `dark`, `twilight` or `bright`, from the plug's light sensor (firmware 2.0.1 and later). |
+| `powerOnState` | | What the plug does after a power cut, when it reports it. |
+| `lastSettingsWrite` | | The outcome of the last plug setting sent: accepted, refused, unconfirmed or not sent. |
+| `powerFactor` | | Only on firmware that offers it; 2.0.1 does not. |
+
+## Commands
+
+Besides on, off, refresh and configure: **identify** blinks the plug's LED for a few seconds (10 by
+default) so you can find it. It does not touch the relay.
+
+## Trips
+
+The plug protects itself: above 15 A (1800 W), or above its own power limit, it switches off. When the
+plug turns itself off within ten seconds of being switched on, or while drawing at least 90% of its
+limit, the driver counts a trip, logs a warning and updates `tripCount` and `lastTrip`. A rule can
+watch `tripCount` and stop switching the plug back on.
+
+One plug in testing ran a heater that drew about 2,000 W. It tripped two seconds after every `on`, every
+ten minutes, for hours. If you see trips, the load is too big for the plug.
+
+## Plug settings
+
+Two settings live in the plug, not in the hub: what it does after a power cut, and its overpower
+cutoff. The driver sends them through Shelly's own channel over Zigbee (or, for the power-on state, the
+standard Zigbee attribute when the plug offers it; firmware 2.0.1 does not). Hubitat cuts the plug's
+replies short, but enough of each reply arrives to tell an accepted setting from a refused one; the
+result shows in `lastSettingsWrite`. A setting that comes back refused or unconfirmed is tried again the
+next time you save the settings.
+
+The driver will not set a cutoff below what the plug is drawing at that moment, since the plug would
+switch off at once.
+
+## Reporting
+
+Configure asks the plug to report at most every 10 seconds and at least every "Longest time between
+reports". It also asks for a report whenever a reading moves by:
+
+| Reading | Change |
+|---|---|
+| Power | 5 W (setting) |
+| Current | 0.05 A |
+| Voltage | 1 V |
+| Frequency | 0.1 Hz |
+| Energy | 0.01 kWh |
+
+The switch reports right away when it changes. The thresholds are converted into the plug's own units
+before they are sent, so they mean the same thing on every firmware.
+
+## Health check
+
+Every 15 minutes the driver checks when it last heard from the plug. After three silent reporting
+periods plus a minute (31 minutes with the default 600 s) it asks the plug for its switch state. An idle
+plug can stay quiet that long while still reachable, so only a question that goes unanswered for a
+minute sets `healthStatus` to `offline`. The next message from the plug sets it back to `online`.
+
+## Units
+
+On Configure the driver reads the plug's multiplier and divisor for voltage, current, power and
+frequency (Electrical Measurement cluster 0x0B04) and for energy (Metering cluster 0x0702). It reads
+them again when the plug reports a new firmware build.
+
+The plugs tested so far report these units:
+
+| Firmware (`softwareBuild`, `firmwareMT`) | Voltage | Current | Power | Frequency | Energy |
+|---|---|---|---|---|---|
+| 2.0.0, 1490-1852-020000FF | 0.01 V | 1 mA | 1 W | 0.01 Hz | 1 mWh |
+| 2.0.1, 1490-1852-020001FF | 0.01 V | 1 mA | 1 W | 0.01 Hz | 1 mWh |
+
+If the plug does not answer for one of them, the driver uses the same units and logs a warning that
+names the missing attributes:
+
+| Reading | Default unit |
+|---|---|
+| Voltage | 0.01 V |
+| Current | 1 mA |
+| Power | 1 W |
+| Frequency | 0.01 Hz |
+| Energy | 1 mWh |
+
+If a reading then looks 10 or 100 times off, run Configure again. If that does not fix it, use the
+adjustment settings and please open an issue with the plug's firmware (the `softwareBuild` and
+`firmwareMT` data values) and the log lines from Configure.
+
+## Not supported
+
+- **Readings over Shelly's own channel.** Hubitat cuts its replies short, so only the two plug settings
+  use it; every reading comes from standard Zigbee.
+- **Wi-Fi and LED settings.** Use the Shelly app for those.
+- **Other Shelly Gen4 plugs.** Only the Plug US is tested. The Power Strip 4 Gen4 has four outlets and
+  needs a different driver.
+
+## Credits
+
+The Zigbee attribute map and the way messages are parsed follow the
+[Shelly 1PM Gen 4 Zigbee Driver](https://github.com/joaomf/hubitat) by joaomf and kkossev (Apache
+License 2.0). Zigbee2MQTT's definition for the S4PL-00116US showed which clusters the plug uses and that
+its units should be read from the device.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

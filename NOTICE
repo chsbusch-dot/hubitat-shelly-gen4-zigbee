@@ -1,0 +1,10 @@
+Shelly Plug US Gen4 (Zigbee) driver for Hubitat Elevation
+Copyright 2026 Chris Busch
+
+The driver's Zigbee attribute map and parse structure follow the "Shelly 1PM Gen 4 Zigbee Driver"
+(https://github.com/joaomf/hubitat), copyright 2025 joaomf and kkossev, licensed under the Apache
+License, Version 2.0.
+
+reference/shelly-1pm-gen4-v1.2.1-additionalAttrs.groovy is a copy of that driver, version 1.2.1, with one
+local change made on 2026-10-11: it reads every attribute of a bundled report. It is kept for reference
+and is not part of the package.
