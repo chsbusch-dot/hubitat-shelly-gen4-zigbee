@@ -836,7 +836,9 @@ check("plug settings: one setting at a time; error, foreign id, default response
     expect(rpcRequests(d).size() == 2, "refused settings wait for the next Save: ${rpcRequests(d)}")
     def e = newDriver(powerLimitWatts: 1200)
     e.updated(); e.advance(30_000 + 25_000)
-    expect(e.lastValue("lastSettingsWrite")?.startsWith("power limit 1200 W: unconfirmed") && e.state.plugSettings == null, "${e.events}")
+    expect(e.lastValue("lastSettingsWrite") == null && rpcRequests(e).size() == 2, "silence: asked once more first: ${rpcRequests(e)}")
+    e.advance(25_000)
+    expect(e.lastValue("lastSettingsWrite") == "power limit 1200 W: unconfirmed (no readable answer in 2 tries; Save Preferences sends it again)" && e.state.plugSettings == null, "${e.events}")
     expect(e.sentCommands().count { it.contains("000200} {0xC001}") } >= 2, "it polled for the reply: ${e.hubCommands}")
 }
 
@@ -882,6 +884,22 @@ check("bluetooth: off sends enable false; a refusal is reported; a write in flig
     expect(rpcRequests(d).size() == 1 && d.lastValue("lastSettingsWrite") == "Bluetooth on: not sent (another write is in progress; try again in a minute)", "${d.events}")
     chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","error":{"code":-103,"mes')
     expect(d.lastValue("lastSettingsWrite") == "Bluetooth off: refused (error -103)" && d.lastValue("bluetooth") == null, "${d.events}")
+    d.setBluetooth("on")
+    d.advance(50_000)
+    expect(d.lastValue("lastSettingsWrite") == "Bluetooth on: unconfirmed (no readable answer in 2 tries; run setBluetooth again)", "${d.lastValue('lastSettingsWrite')}")
+}
+
+check("plug settings: a silent first try is asked once more, and the second answer counts") {
+    // 2026-10-15: Bluetooth on to 4613 got no readable answer, the same request a minute later was accepted in 3 s.
+    def d = newDriver()
+    d.setBluetooth("on")
+    d.advance(25_000)
+    List<String> req = rpcRequests(d)
+    expect(req.size() == 2 && req[1] == '{"id":2,"method":"BLE.SetConfig","params":{"config":{"enable":true,"rpc":{"enable":true}}}}', "same request, new id: ${req}")
+    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(d.state.rpcPending != null, "a late answer to the first try is not ours any more")
+    chunk(d, '{"id":2,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(d.lastValue("lastSettingsWrite") == "Bluetooth on: accepted" && d.lastValue("bluetooth") == "on", "${d.events}")
 }
 
 check("plug settings: the RPC id wraps from 99 to 1; Configure forgets what the plug accepted") {

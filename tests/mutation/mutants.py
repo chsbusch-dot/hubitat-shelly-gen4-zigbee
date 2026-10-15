@@ -80,6 +80,8 @@ MUTANTS = {
             '    ["plugSettings", "settingsSkip", "startUpOnOff", "powerFactorSupported", "lightLevelSupported"].each { state.remove(it) }\n', ""),
     "M27": ("setBluetooth on sends enable false",
             '    Map config = v == "on" ? [enable: true, rpc: [enable: true]] : [enable: false]', '    Map config = [enable: false]'),
+    "M28": ("an RPC write that gets no answer is not asked again",
+            "@Field static final Integer RPC_ATTEMPTS = 2", "@Field static final Integer RPC_ATTEMPTS = 1"),
     "M12": ("the hub's firmwareMT is left out of the firmware identity",
             '[build, device.getDataValue("firmwareMT")].findAll', "[build].findAll"),
 }

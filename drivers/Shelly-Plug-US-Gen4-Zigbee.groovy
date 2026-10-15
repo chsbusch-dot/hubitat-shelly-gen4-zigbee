@@ -145,6 +145,7 @@ metadata {
 // still names the request id and whether "result" or "error" follows, which is all a settings write needs.
 @Field static final Integer RPC_POLLS = 6
 @Field static final Integer RPC_CHUNK_BYTES = 40
+@Field static final Integer RPC_ATTEMPTS = 2
 @Field static final Integer POWER_LIMIT_MIN = 100
 @Field static final Integer RPC_TIMEOUT_SECONDS = 25
 @Field static final Map RPC_INITIAL_STATE = ["off": "off", "on": "on", "previous": "restore_last"]   // "keep" is absent: never sent
@@ -409,11 +410,11 @@ private void settingsOutcome(String key, value, String result, String detail, bo
  * One RPC request: its length to TxCtl, then its JSON text to TxData in chunks of RPC_CHUNK_BYTES
  * (one Zigbee frame holds about 80 bytes; Zigbee2MQTT writes 40 at a time), then polls for the reply.
  */
-private void sendRpc(String method, Map params, String key, value) {
+private void sendRpc(String method, Map params, String key, value, int attempt = 1) {
     int id = (((state.rpcId ?: 0) as int) % 99) + 1
     state.rpcId = id
     byte[] bytes = JsonOutput.toJson([id: id, method: method, params: params]).getBytes("UTF-8")
-    state.rpcPending = [id: id, polls: 0, key: key, value: value, reply: ""]
+    state.rpcPending = [id: id, polls: 0, key: key, value: value, reply: "", method: method, params: params, attempt: attempt]
     logDebug "RPC ${method} ${params}"
     List<String> cmds = [rpcFrame("02", "0100" + "23" + le32(bytes.length))]                     // TxCtl: length
     for (int off = 0; off < bytes.length; off += RPC_CHUNK_BYTES) {
@@ -437,8 +438,21 @@ void rpcPoll() {
     if (polls < RPC_POLLS) runIn(3, "rpcPoll")
 }
 
+/**
+ * No readable answer: these requests are idempotent (the same setting written twice), so ask once more
+ * before calling it unconfirmed. On 2026-10-15 one of five live writes needed exactly that.
+ */
 void rpcTimeout() {
-    rpcResult("unconfirmed", "no readable answer in ${RPC_TIMEOUT_SECONDS} s; Save Preferences sends it again")
+    Map pending = state.rpcPending as Map
+    if (pending == null) return
+    if (((pending.attempt ?: 1) as int) < RPC_ATTEMPTS) {
+        logDebug "RPC ${pending.method}: no readable answer, asking once more"
+        unschedule("rpcPoll")
+        sendRpc(pending.method as String, pending.params as Map, pending.key as String, pending.value, ((pending.attempt ?: 1) as int) + 1)
+        return
+    }
+    String again = pending.key == "bluetooth" ? "run setBluetooth again" : "Save Preferences sends it again"
+    rpcResult("unconfirmed", "no readable answer in ${RPC_ATTEMPTS} tries; ${again}")
 }
 
 private void rpcResult(String result, String detail) {
