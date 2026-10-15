@@ -93,6 +93,8 @@ seconds later, one at a time, and only when they differ from what the plug last 
 | `powerOnState` | | What the plug does after a power cut, when it reports it. |
 | `lastSettingsWrite` | | The outcome of the last plug setting sent: accepted, refused, unconfirmed or not sent. |
 | `bluetooth` | | `on` or `off`, once a setBluetooth command has been accepted. |
+| `wifiStatus` | | The plug's Wi-Fi as the plug reports it, for example `connecting` or `got ip`. |
+| `wifiIp` | | The plug's Wi-Fi address, or `none`. |
 | `powerFactor` | | Only on firmware that offers it; 2.0.1 does not. |
 
 ## Commands
@@ -103,8 +105,20 @@ Besides on, off, refresh and configure:
 - **setBluetooth** turns the plug's Bluetooth on or off. In Zigbee mode the Shelly app reaches the plug
   only over Bluetooth, for example to give it Wi-Fi so it can update its firmware. The outcome shows in
   `lastSettingsWrite` and `bluetooth`.
+- **setWifi** gives the plug a Wi-Fi network: type the network name and its password (leave the password
+  empty for an open network). The plug needs Wi-Fi to update its firmware, in Zigbee mode too. The
+  password goes to the plug only; the driver does not log it or keep it. The outcome shows in
+  `lastSettingsWrite`, then `wifiStatus` and `wifiIp` show whether the plug joined.
 
-Neither touches the relay.
+None of them touches the relay.
+
+## Firmware updates
+
+The plug fetches firmware over Wi-Fi, also in Zigbee mode; Hubitat cannot update it over Zigbee. Give it
+a network with **setWifi** (or with the Shelly app over Bluetooth), wait until `wifiIp` shows an address,
+then update it from the Shelly app or from the plug's own web page at that address. The update restarts
+the plug, and it comes back as set under power-on state (see [Plug settings](#plug-settings)). Press
+Refresh afterwards: the driver sees the new firmware and reads the plug's units again.
 
 ## Trips
 
@@ -181,9 +195,9 @@ adjustment settings and please open an issue with the plug's firmware (the `soft
 
 ## Not supported
 
-- **Readings over Shelly's own channel.** Hubitat cuts its replies short, so only the two plug settings
-  use it; every reading comes from standard Zigbee.
-- **Wi-Fi and LED settings.** Use the Shelly app for those.
+- **Readings over Shelly's own channel.** Hubitat cuts its replies short, so only plug settings use it;
+  every reading comes from standard Zigbee.
+- **LED settings.** Use the Shelly app for those.
 - **Other Shelly Gen4 plugs.** Only the Plug US is tested. The Power Strip 4 Gen4 has four outlets and
   needs a different driver.
 

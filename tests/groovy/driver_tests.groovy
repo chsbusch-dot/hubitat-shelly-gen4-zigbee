@@ -54,6 +54,7 @@ def newDriver = { Map prefs = [:] ->
     d.metadataRecord.inputs.each { if (it.defaultValue != null) d.settings[it.name as String] = it.defaultValue }
     d.settings.putAll(prefs)
     d.device.onRemoveSetting = { String n -> d.settings.remove(n) }
+    driverClass.WIFI_FRAMES.clear()                                   // in memory, shared by every instance
     d.onHubCommand = { List<String> cmds ->
         cmds.findAll { (it =~ /0xFC01 \{049014[0-9A-F]{2}02/).find() }.each {
             String key = "ack-${d.zigbee.descriptions.size()}"
@@ -360,7 +361,7 @@ check("configure: reads units and software build; never switches the relay") {
     expect(reads.any { it.cluster == 0x0B04 && it.attrs.containsAll([0x0400, 0x0401]) }, "frequency scale read: ${reads}")
     expect(reads.any { it.cluster == 0x0702 && it.attrs.containsAll([0x0300, 0x0301, 0x0302]) }, "0702 unit, multiplier, divisor read: ${reads}")
     expect(reads.any { it.cluster == 0x0000 && it.attrs == [0x4000] }, "software build read: ${reads}")
-    expect(!cmds.any { it.startsWith("he raw") }, "no raw frames: ${cmds}")
+    expect(!cmds.any { it.startsWith("he raw") && !it.startsWith("he raw 0x7257 1 0xEF 0xFC02 ") }, "no raw frames but the Wi-Fi status read: ${cmds}")
     expect(d.zigbee.reporting.isEmpty(), "reporting waits for the units: ${d.zigbee.reporting}")
     expect(d.dueAt.applyReporting == d.clockMs + 8000, "applyReporting in 8 s: ${d.dueAt}")
     expect(d.periodic.healthCheck == 15, "health check every 15 minutes: ${d.periodic}")
@@ -460,7 +461,7 @@ check("migration: the 1PM driver's calibration workaround is removed, with a war
     expect(!d.settings.containsKey("powerCalibration") && !d.settings.containsKey("currentCalibration"), "gone from settings: ${d.settings}")
     List w = d.logsMatching("left by the previous driver")
     expect(w.size() == 2 && w.any { it.contains("powerCalibration = 9900") } && w.any { it.contains("currentCalibration = -90") }, "warned for the two non-zero: ${w}")
-    expect(!d.state.keySet().any { it.startsWith("rpc") || it == "zclSeq" }, "RPC state cleared: ${d.state}")
+    expect(!d.state.keySet().any { it.startsWith("rpc") } && d.state.zclSeq != 71, "RPC state cleared; zclSeq restarts with this driver's own frames: ${d.state}")
     expect(d.device.deletedStates.containsAll(["rpcStatus", "rpcResponse", "producedEnergy", "inputMode"]), "stale attributes deleted: ${d.device.deletedStates}")
     giveUnits(d, UNITS_020000FF)
     deliver(d, frame("0B04", "050B", "29", hex(1028, 4)))
@@ -783,6 +784,7 @@ check("plug settings: a refused 0006/4003 write (write response or read-back) fa
 
 check("plug settings: the power limit goes out as RPC Switch.SetConfig in 40-byte TxData chunks") {
     def d = newDriver(powerLimitWatts: 1500)
+    d.state.wifiSupported = false                                       // no FC02 frames: the ZCL sequence numbers below start at 1
     d.updated()
     d.advance(30_000)
     String json = '{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"power_limit":1500}}}'
@@ -967,6 +969,129 @@ check("recorded: 4612's error -103, its opening cut short at \"e, is refused, no
     deliver(e, rpcReply('":{"code":-103,"message":"Missing or bad argum', 50))
     deliver(e, rpcReply('{"id":2,"src":"shellyplugusg4-aabbcc000001","e', 50))
     expect(e.lastValue("lastSettingsWrite") == "Bluetooth on: refused (error -103)", "with the code ahead of it: ${e.events}")
+}
+
+// --------------------------------------------------------------------------- Wi-Fi (WOR-781)
+
+/** A catchall on FC02, Shelly's Wi-Fi setup cluster, as the plugs send them from endpoint 0xEF. */
+def wifiFrame = { String command, List data ->
+    [raw: "catchall", profileId: "C001", clusterId: "FC02", clusterInt: 0xFC02, sourceEndpoint: "EF", destinationEndpoint: "01",
+     options: "0040", messageType: "00", dni: "7257", isClusterSpecific: false, isManufacturerSpecific: true, manufacturerId: "1490",
+     command: command, direction: "01", data: data]
+}
+def wifiAck = { String status = "00" -> wifiFrame("04", [status]) }
+def textBytes = { String s -> s.getBytes("UTF-8").collect { String.format("%02X", it & 0xFF) } }
+def wifiStatusReply = { String status, String ip ->
+    wifiFrame("01", ["00", "00", "00", "42", String.format("%02X", status.length())] + textBytes(status) +
+                    ["01", "00", "00", "42", String.format("%02X", ip.length())] + textBytes(ip))
+}
+/** Every FC02 frame sent so far, as [ZCL command, body]. */
+def wifiSent = { drv ->
+    drv.sentCommands().findAll { it.contains(" 0xFC02 ") }.collect { String c ->
+        def m = c =~ /\{049014[0-9A-F]{2}([0-9A-F]{2})([0-9A-F]*)\}/
+        m.find() ? [m.group(1), m.group(2)] : null
+    }
+}
+
+check("wifi: setWifi sends enable, DHCP and the network, then the password, then Action 1, each after an acknowledgement") {
+    def d = newDriver()
+    d.setWifi("Home Net", "correct horse 42")
+    expect(wifiSent(d) == [["02", "0400" + "10" + "01" + "0300" + "10" + "01" + "0500" + "42" + "08" + hexOfText("Home Net")]], "first write alone: ${wifiSent(d)}")
+    expect(d.sentCommands().every { !it.contains(" 0xFC02 ") || it.startsWith("he raw 0x7257 1 0xEF 0xFC02 {049014") && it.endsWith("} {0xC001}") }, "endpoint EF, Shelly's profile and manufacturer code")
+    d.advance(5_000)
+    expect(wifiSent(d).size() == 1, "nothing more without an acknowledgement")
+    deliver(d, wifiAck())
+    expect(wifiSent(d)[1] == ["02", "0600" + "42" + "10" + hexOfText("correct horse 42")], "then the password: ${wifiSent(d)}")
+    deliver(d, wifiAck())
+    expect(wifiSent(d)[2] == ["02", "0200" + "20" + "01"], "then Action 1: ${wifiSent(d)}")
+    deliver(d, wifiAck())
+    expect(d.lastValue("lastSettingsWrite") == "Wi-Fi Home Net: accepted (wifiStatus and wifiIp show when it has joined)", "${d.events}")
+    expect(d.state.wifiPending == null && d.dueAt.wifiTimeout == null && driverClass.WIFI_FRAMES.isEmpty(), "${d.state} ${d.dueAt}")
+    expect(d.zigbee.switchCommands.isEmpty() && !d.sentCommands().any { it.contains("0x0006 0x0") && it.startsWith("he cmd") }, "the relay is not touched")
+}
+
+check("wifi: the password reaches the plug and nothing else: no log line, event or state holds it") {
+    def d = newDriver(logEnable: true)
+    String pw = "Zq7!secret pw"
+    String hexPw = hexOfText(pw)
+    List<String> states = []
+    d.setWifi("Home Net", pw)
+    states << groovy.json.JsonOutput.toJson(d.state)                    // while the password frame waits
+    3.times { deliver(d, wifiAck()); states << groovy.json.JsonOutput.toJson(d.state) }
+    d.advance(60_000)
+    expect(d.sentCommands().any { it.contains(hexPw) }, "positive control: the password did go to the plug")
+    String seen = d.logLines.join("\n") + "\n" + states.join("\n") + "\n" + groovy.json.JsonOutput.toJson(d.state) + "\n" + d.events.collect { "${it.value} ${it.descriptionText}" }.join("\n")
+    expect(!seen.contains(pw) && !seen.toUpperCase().contains(hexPw), "the password shows up outside the frame sent to the plug")
+}
+
+check("wifi: an open network sends no password; a bad name or password is not sent; a second setWifi waits") {
+    def d = newDriver()
+    d.setWifi("Cafe", "")
+    deliver(d, wifiAck())
+    expect(wifiSent(d)[1] == ["02", "0200" + "20" + "01"], "Action 1 right after the network: ${wifiSent(d)}")
+    d.setWifi("Other", "longenough1")
+    expect(wifiSent(d).size() == 2 && d.lastValue("lastSettingsWrite") == "Wi-Fi Other: not sent (another Wi-Fi write is in progress; try again in a minute)", "${d.events}")
+    deliver(d, wifiAck())
+    expect(d.lastValue("lastSettingsWrite").startsWith("Wi-Fi Cafe: accepted"), "the first one still completes: ${d.events}")
+    def e = newDriver()
+    e.setWifi("", "longenough1")
+    expect(e.lastValue("lastSettingsWrite") == "Wi-Fi: not sent (the network name must be 1 to 32 bytes)", "${e.events}")
+    e.setWifi("x" * 33, "longenough1")
+    e.setWifi("Home", "short")
+    expect(e.lastValue("lastSettingsWrite") == "Wi-Fi Home: not sent (a password has 8 to 63 characters; leave it empty for an open network)", "${e.events}")
+    e.setWifi("Home", "p" * 64)
+    expect(wifiSent(e).isEmpty() && e.state.wifiPending == null && e.eventsNamed("lastSettingsWrite").size() == 4, "nothing sent: ${wifiSent(e)}")
+}
+
+check("wifi: a refused write or no acknowledgement ends the attempt and drops its frames") {
+    def d = newDriver()
+    d.setWifi("Home Net", "correct horse 42")
+    deliver(d, wifiFrame("04", ["87", "06", "00"]))                    // INVALID_VALUE for attribute 0006
+    expect(d.lastValue("lastSettingsWrite") == "Wi-Fi Home Net: refused (attribute 0006: invalid value)", "${d.events}")
+    expect(d.state.wifiPending == null && driverClass.WIFI_FRAMES.isEmpty() && wifiSent(d).size() == 1, "${d.state}")
+    def e = newDriver()
+    e.setWifi("Home Net", "correct horse 42")
+    deliver(e, wifiAck())
+    e.advance(30_000)
+    expect(e.lastValue("lastSettingsWrite") == "Wi-Fi Home Net: unconfirmed (not every write was acknowledged in 30 s; run setWifi again)", "${e.events}")
+    expect(e.state.wifiPending == null && driverClass.WIFI_FRAMES.isEmpty(), "${e.state}")
+    deliver(e, wifiAck())
+    expect(wifiSent(e).size() == 2, "a late acknowledgement sends nothing: ${wifiSent(e)}")
+}
+
+check("wifi: Status and IP are read back after Action 1 until the plug has an address, at most 4 times") {
+    def d = newDriver()
+    d.setWifi("Home Net", "correct horse 42")
+    3.times { deliver(d, wifiAck()) }
+    d.advance(10_000)
+    List s = wifiSent(d)
+    expect(s.size() == 5 && s[3] == ["02", "0200" + "20" + "00"] && s[4] == ["00", "0000" + "0100"], "Action 0, then a read of Status and IP: ${s}")
+    deliver(d, wifiStatusReply("connecting", ""))
+    expect(d.lastValue("wifiStatus") == "connecting" && d.lastValue("wifiIp") == "none" && d.dueAt.wifiRead != null, "${d.events} ${d.dueAt}")
+    d.advance(15_000)
+    expect(wifiSent(d).size() == 7, "read again 15 s later: ${wifiSent(d)}")
+    deliver(d, wifiStatusReply("got ip", "192.0.2.44"))                // RFC 5737 documentation address
+    expect(d.lastValue("wifiStatus") == "got ip" && d.lastValue("wifiIp") == "192.0.2.44", "${d.events}")
+    expect(d.dueAt.wifiRead == null && d.state.wifiReadsLeft == null, "no more reads once it has an address: ${d.dueAt}")
+    def e = newDriver()
+    e.setWifi("Home Net", "")
+    2.times { deliver(e, wifiAck()) }
+    e.advance(120_000)
+    expect(wifiSent(e).count { it[0] == "00" } == 4 && e.dueAt.wifiRead == null, "gives up after 4 reads: ${wifiSent(e)}")
+}
+
+check("wifi: refresh reads Status and IP while the cluster answers, without Action 0 during a setWifi; unsupported is remembered") {
+    def d = newDriver()
+    List<String> fc02 = d.refresh().findAll { it.contains(" 0xFC02 ") }
+    expect(fc02.size() == 2 && fc02[0].contains("02" + "0200" + "20" + "00}") && fc02[1].contains("00" + "0000" + "0100}"), "Action 0 then the read: ${fc02}")
+    d.setWifi("Home Net", "correct horse 42")
+    fc02 = d.refresh().findAll { it.contains(" 0xFC02 ") }
+    expect(fc02.size() == 1 && fc02[0].contains("0000" + "0100}"), "only the read while setWifi is staging: ${fc02}")
+    def e = newDriver()
+    deliver(e, wifiFrame("01", ["00", "00", "86", "01", "00", "86"]))
+    expect(e.state.wifiSupported == false && !e.refresh().any { it.contains(" 0xFC02 ") }, "not read again: ${e.state}")
+    List<String> c = e.configure()
+    expect(e.state.wifiSupported == null && c.any { it.contains(" 0xFC02 ") }, "Configure asks again: ${c}")
 }
 
 check("plug settings: the RPC id wraps from 99 to 1; Configure forgets what the plug accepted") {
