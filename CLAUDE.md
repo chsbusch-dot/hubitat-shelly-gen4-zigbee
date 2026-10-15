@@ -71,7 +71,7 @@ the hub compile catches a new construct.
 
 Optional, not in CI (about a minute): `tests/mutation/run.sh` breaks one guarded behaviour per mutant
 (bundled reports, plug units, relay in configure, signed power, raw thresholds, migration, health,
-digital/physical, fallback units, firmware re-read, identify, plug settings and RPC judging, Wi-Fi setup, trips,
+digital/physical, fallback units, firmware re-read, identify, plug settings and RPC judging, LED settings, Wi-Fi setup, trips,
 power factor). The unmutated `base` must pass and every mutant must fail. Anchors are exact strings; re-anchor a mutant when the code under it changes.
 
 ## Branches and PRs

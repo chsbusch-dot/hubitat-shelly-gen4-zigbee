@@ -38,13 +38,18 @@
  * 1.3.0  2026-10-15  setWifi command, wifiStatus and wifiIp, over Shelly's Wi-Fi setup cluster (WOR-781)
  * 1.3.1  2026-10-15  setWifi no longer writes DHCP (read-only on the plug, which refused the whole setup);
  *                    0.0.0.0 counts as no Wi-Fi address; wifiNetwork shows the network the plug is set to join
+ * 1.3.2  2026-10-15  an RPC reply cut at the key after src (two-digit request id) is judged from its tail (WOR-784)
+ * 1.4.0  2026-10-15  LED ring colour, mode and night mode as preferences (PLUGS_UI over RPC). Review fixes: a quick trip
+ *                    needs a hub-sent on or some load; a write that never finished expires; an RPC retry keeps its id and
+ *                    chunks before the first poll are ignored; a firmware change is noticed once; Configure forgets the
+ *                    Bluetooth attribute; more ZCL types decoded (WOR-786)
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.3.1" }
+static String driverVersion() { "1.4.0" }
 
 metadata {
     definition(
@@ -107,6 +112,24 @@ metadata {
               defaultValue: "keep"
         input name: "powerLimitWatts", type: "number", title: "Switch off above (W)", range: "100..1800",
               description: "The plug switches itself OFF when the load draws more than this. Leave empty to keep the plug's own setting; 1800 W is its maximum."
+        input name: "ledMode", type: "enum", title: "LED ring",
+              options: ["keep": "Keep the plug's own setting", "power": "Colour follows the power draw", "switch": "One colour when on, another when off", "off": "Off"],
+              defaultValue: "keep"
+        input name: "ledOnColor", type: "enum", title: "LED colour when on (one colour mode)",
+              options: ["keep": "Keep", "red": "Red", "green": "Green", "blue": "Blue", "yellow": "Yellow", "orange": "Orange", "purple": "Purple", "cyan": "Cyan", "white": "White"],
+              defaultValue: "keep"
+        input name: "ledOffColor", type: "enum", title: "LED colour when off (one colour mode)",
+              options: ["keep": "Keep", "red": "Red", "green": "Green", "blue": "Blue", "yellow": "Yellow", "orange": "Orange", "purple": "Purple", "cyan": "Cyan", "white": "White"],
+              defaultValue: "keep"
+        input name: "ledBrightness", type: "number", title: "LED brightness (%)", range: "1..100",
+              description: "Leave empty to keep the plug's own setting."
+        input name: "ledNightMode", type: "enum", title: "LED at night",
+              options: ["keep": "Keep the plug's own setting", "on": "Dim or switch off the LED between the hours below", "off": "No night mode"],
+              defaultValue: "keep"
+        input name: "ledNightFrom", type: "text", title: "Night starts (HH:MM)", defaultValue: "22:00"
+        input name: "ledNightTo", type: "text", title: "Night ends (HH:MM)", defaultValue: "06:00"
+        input name: "ledNightBrightness", type: "number", title: "LED brightness at night (%)", range: "0..100",
+              description: "0 switches the LED off at night.", defaultValue: 10
         input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
         input name: "logEnable", type: "bool", title: "Enable debug logging",
               description: "Turns itself off after 30 minutes.", defaultValue: false
@@ -159,6 +182,11 @@ metadata {
 @Field static final Integer RPC_ATTEMPTS = 2
 @Field static final Integer POWER_LIMIT_MIN = 100
 @Field static final Integer RPC_TIMEOUT_SECONDS = 25
+// A firmware change shows twice, seconds apart: the plug's build string, then the hub's firmwareMT catching up.
+@Field static final Long FIRMWARE_SETTLE_MS = 300000L
+// LED ring colours for the one-colour mode, as PLUGS_UI wants them: red, green and blue in percent.
+@Field static final Map LED_RGB = [red: [100, 0, 0], green: [0, 100, 0], blue: [0, 0, 100], yellow: [100, 100, 0], orange: [100, 50, 0],
+                                   purple: [60, 0, 100], cyan: [0, 100, 100], white: [100, 100, 100]]
 
 // Shelly's Wi-Fi setup over Zigbee: cluster FC02 on endpoint 0xEF, profile 0xC001 (Shelly's Zigbee docs,
 // Zigbee2MQTT's shellyWiFiSetup). Writes stage the station settings, Action 1 applies them and Action 0
@@ -201,6 +229,11 @@ List<String> configure() {
     migrateFromOtherDrivers()
     state.remove("fallbackWarned")
     ["plugSettings", "settingsSkip", "startUpOnOff", "powerFactorSupported", "lightLevelSupported", "wifiSupported"].each { state.remove(it) }
+    try {
+        device.deleteCurrentState("bluetooth")        // what the driver last sent, not what a reset plug has
+    } catch (Exception ignored) {
+        // nothing stored under that name
+    }
     scheduleHousekeeping()
     List<String> cmds = []
     cmds += zigbee.readAttribute(0x0000, 0x4000)      // software build, to notice a firmware change
@@ -339,6 +372,7 @@ void applyReporting() {
  * is not retried until the next Save Preferences.
  */
 void applyPlugSettings() {
+    dropStalePending()
     if (state.rpcPending != null || state.startUpPending != null) {
         runIn(30, "applyPlugSettings")                 // one write at a time
         return
@@ -354,7 +388,7 @@ void applyPlugSettings() {
     }
     if (todo.initial_state != null && state.startUpOnOff == true) {
         logInfo "setting the power-on state to ${todo.initial_state} (0006/4003)"
-        state.startUpPending = [value: todo.initial_state]
+        state.startUpPending = [value: todo.initial_state, at: now()]
         List<String> cmds = []
         cmds += zigbee.writeAttribute(0x0006, 0x4003, DataType.ENUM8, START_UP_ON_OFF[todo.initial_state] as Integer)
         cmds += zigbee.readAttribute(0x0006, 0x4003)   // the read-back confirms it (handlePowerOnState)
@@ -362,9 +396,13 @@ void applyPlugSettings() {
         runIn(RPC_TIMEOUT_SECONDS, "startUpTimeout")
         return
     }
-    String key = todo.initial_state != null ? "initial_state" : "power_limit"
-    def value = key == "initial_state" ? RPC_INITIAL_STATE[todo.initial_state] : todo.power_limit
-    sendRpc("Switch.SetConfig", [id: 0, config: [(key): value]], key, todo[key])
+    if (todo.initial_state != null || todo.power_limit != null) {
+        String key = todo.initial_state != null ? "initial_state" : "power_limit"
+        def value = key == "initial_state" ? RPC_INITIAL_STATE[todo.initial_state] : todo.power_limit
+        sendRpc("Switch.SetConfig", [id: 0, config: [(key): value]], key, todo[key])
+        return
+    }
+    sendRpc("PLUGS_UI.SetConfig", [config: [leds: todo.led]], "led", todo.led)
 }
 
 /**
@@ -374,6 +412,7 @@ void applyPlugSettings() {
  */
 void setBluetooth(String onOff) {
     String v = onOff?.toString()?.toLowerCase() == "off" ? "off" : "on"
+    dropStalePending()
     if (state.rpcPending != null || state.startUpPending != null) {
         settingsOutcome("bluetooth", v, "not sent", "another write is in progress; try again in a minute", false)
         return
@@ -390,9 +429,59 @@ private Map pendingPlugSettings() {
     if (onState && RPC_INITIAL_STATE[onState]) wanted.initial_state = onState
     BigDecimal limit = toDecimal(settings?.powerLimitWatts)
     if (limit > 0) wanted.power_limit = Math.max(POWER_LIMIT_MIN, Math.min(PLUG_MAX_WATTS, limit.intValue()))
+    Map leds = ledSettings()
+    if (leds) wanted.led = leds
     Map done = (state.plugSettings ?: [:]) as Map
     List skip = (state.settingsSkip ?: []) as List
     return wanted.findAll { k, v -> done[k] != v && !skip.contains(k) }
+}
+
+/** The PLUGS_UI "leds" settings the preferences ask for; empty when every LED preference says keep. */
+private Map ledSettings() {
+    Map leds = [:]
+    String mode = settings?.ledMode as String
+    if (mode && mode != "keep") leds.mode = mode
+    Map sw = [:]
+    ["on", "off"].each { String s ->
+        String c = settings?.get("led${s.capitalize()}Color".toString()) as String
+        if (c && LED_RGB[c]) sw[s] = [rgb: LED_RGB[c]]
+    }
+    int bright = Math.min(100, toDecimal(settings?.ledBrightness).intValue())
+    if (bright > 0) ["on", "off"].each { String s -> sw[s] = ((sw[s] ?: [:]) as Map) + [brightness: bright] }
+    Map colors = [:]
+    if (sw) colors["switch:0"] = sw
+    if (bright > 0) colors.power = [brightness: bright]
+    if (colors) leds.colors = colors
+    String night = settings?.ledNightMode as String
+    if (night == "off") {
+        leds.night_mode = [enable: false]
+    } else if (night == "on") {
+        int nightBright = Math.max(0, Math.min(100, toDecimal(settings?.ledNightBrightness).intValue()))
+        leds.night_mode = [enable: true, brightness: nightBright, active_between: [timeOf(settings?.ledNightFrom, "22:00"), timeOf(settings?.ledNightTo, "06:00")]]
+    }
+    return leds
+}
+
+/** "HH:MM", or the fallback when the setting is not a time of day. */
+private static String timeOf(def v, String fallback) {
+    String s = v?.toString()?.trim()
+    return (s && s ==~ /([01]\d|2[0-3]):[0-5]\d/) ? s : fallback
+}
+
+/**
+ * A write whose timeout job never fired (the hub restarted, the driver was updated mid-write) must not
+ * block later writes forever: a pending write older than its timeouts allow is forgotten.
+ */
+private void dropStalePending() {
+    [rpcPending: RPC_TIMEOUT_SECONDS * 3, startUpPending: RPC_TIMEOUT_SECONDS * 2, wifiPending: WIFI_TIMEOUT_SECONDS * 2].each { String key, int seconds ->
+        Map pending = state.get(key) as Map
+        if (pending == null) return
+        Long at = pending.at as Long
+        if (at != null && now() - at <= seconds * 1000L) return
+        logWarn "forgetting a ${key == 'wifiPending' ? 'Wi-Fi' : 'settings'} write that never finished"
+        state.remove(key)
+        if (key == "wifiPending") WIFI_FRAMES.remove(device.deviceNetworkId as String)
+    }
 }
 
 void startUpTimeout() {
@@ -414,7 +503,7 @@ private void startUpRefused(String detail) {
 
 /** Records one setting's outcome and moves on to the next pending setting, if any. */
 private void settingsOutcome(String key, value, String result, String detail, boolean skipOnFail = true) {
-    String what = key == "initial_state" ? "power-on state ${value}" : (key == "bluetooth" ? "Bluetooth ${value}" : "power limit ${value} W")
+    String what = key == "initial_state" ? "power-on state ${value}" : (key == "bluetooth" ? "Bluetooth ${value}" : (key == "led" ? "LED settings" : "power limit ${value} W"))
     String text = "${what}: ${result}${detail ? ' (' + detail + ')' : ''}"
     if (result == "accepted") {
         state.plugSettings = ((state.plugSettings ?: [:]) as Map) + [(key): value]
@@ -434,8 +523,8 @@ private void settingsOutcome(String key, value, String result, String detail, bo
  * (one Zigbee frame holds about 80 bytes; Zigbee2MQTT writes 40 at a time), then polls for the reply.
  * Only TxCtl goes out here; rpcWriteAcked sends each chunk once the plug has acknowledged the write before.
  */
-private void sendRpc(String method, Map params, String key, value, int attempt = 1) {
-    int id = (((state.rpcId ?: 0) as int) % 99) + 1
+private void sendRpc(String method, Map params, String key, value, int attempt = 1, Integer sameId = null) {
+    int id = sameId != null ? sameId : (((state.rpcId ?: 0) as int) % 99) + 1
     state.rpcId = id
     byte[] bytes = JsonOutput.toJson([id: id, method: method, params: params]).getBytes("UTF-8")
     List<String> chunks = []
@@ -444,7 +533,7 @@ private void sendRpc(String method, Map params, String key, value, int attempt =
         chunks << "0000" + "42" + String.format("%02X", n) + hexOf(bytes, off, n)                    // TxData chunk
     }
     state.rpcPending = [id: id, polls: 0, key: key, value: value, reply: "", method: method, params: params, attempt: attempt,
-                        chunks: chunks, sent: 0]
+                        chunks: chunks, sent: 0, at: now()]
     logDebug "RPC ${method} ${params}"
     runIn(RPC_TIMEOUT_SECONDS, "rpcTimeout")
     sendZigbee([rpcFrame("02", "0100" + "23" + le32(bytes.length))])                                // TxCtl: length
@@ -485,8 +574,9 @@ void rpcPoll() {
 }
 
 /**
- * No readable answer: these requests are idempotent (the same setting written twice), so ask once more
- * before calling it unconfirmed. On 2026-10-15 one of five live writes needed exactly that.
+ * No readable answer: these requests are idempotent (the same setting written twice), so ask once more,
+ * under the same request id so that a late answer to the first try still counts, before calling it
+ * unconfirmed. On 2026-10-15 one of five live writes needed exactly that.
  */
 void rpcTimeout() {
     Map pending = state.rpcPending as Map
@@ -494,7 +584,7 @@ void rpcTimeout() {
     if (((pending.attempt ?: 1) as int) < RPC_ATTEMPTS) {
         logDebug "RPC ${pending.method}: no readable answer, asking once more"
         unschedule("rpcPoll")
-        sendRpc(pending.method as String, pending.params as Map, pending.key as String, pending.value, ((pending.attempt ?: 1) as int) + 1)
+        sendRpc(pending.method as String, pending.params as Map, pending.key as String, pending.value, ((pending.attempt ?: 1) as int) + 1, pending.id as Integer)
         return
     }
     String again = pending.key == "bluetooth" ? "run setBluetooth again" : "Save Preferences sends it again"
@@ -561,6 +651,10 @@ private void parseRpc(Map descMap) {
 private void handleRpcChunk(String text) {
     Map pending = state.rpcPending as Map
     if (pending == null || !text) return
+    if (((pending.polls ?: 0) as int) == 0) {
+        logDebug "RPC chunk before this request's first poll (a late or repeated answer to an earlier one), ignored: ${text}"
+        return
+    }
     if (text.startsWith('{"id":')) {
         pending.head = text
     } else {
@@ -582,11 +676,18 @@ private void handleRpcChunk(String text) {
         state.rpcPending = pending
         return
     }
-    String reply = head + ((pending.tail ?: "") as String)
-    if (reply.contains('"error"') || (head =~ /"src":"[^"]*","e/).find()) {
+    String tail = (pending.tail ?: "") as String
+    String reply = head + tail
+    // The key after src names the outcome, but Hubitat hands over 46 of the first 50 bytes: with a
+    // one-digit request id the opening ends on the r of result, with a two-digit id one character
+    // earlier, on the quote before it (2026-10-15, id 14). Then the tail tells: a SetConfig result
+    // carries restart_required, an error carries its code.
+    boolean refused = reply.contains('"error"') || (head =~ /"src":"[^"]*","e/).find() || tail.contains('"code":')
+    boolean accepted = reply.contains('"result"') || (head =~ /"src":"[^"]*","r/).find() || tail.contains('restart_required')
+    if (refused) {
         def code = reply =~ /"code":(-?\d+)/
         rpcResult("refused", code.find() ? "error ${code.group(1)}" : "error, its code cut off")
-    } else if (reply.contains('"result"') || (head =~ /"src":"[^"]*","r/).find()) {
+    } else if (accepted) {
         rpcResult("accepted", null)
     } else {
         logDebug "RPC reply not judged yet: ${reply}"
@@ -621,6 +722,7 @@ private static String hexToText(String hex) {
 void setWifi(String network, String password = null) {
     byte[] name = (network ?: "").getBytes("UTF-8")
     byte[] pass = (password ?: "").getBytes("UTF-8")
+    dropStalePending()
     if (state.wifiPending != null) {
         wifiOutcome(network, "not sent", "another Wi-Fi write is in progress; try again in a minute")
         return
@@ -639,7 +741,7 @@ void setWifi(String network, String password = null) {
     if (pass.length > 0) frames << wifiWrite(textRecord(0x0006, pass))                                                // password
     frames << wifiWrite(attrLe(0x0002) + "20" + "01")                                                               // Action 1: apply
     WIFI_FRAMES.put(device.deviceNetworkId as String, new ArrayList<String>(frames.subList(1, frames.size())))
-    state.wifiPending = [network: network]
+    state.wifiPending = [network: network, at: now()]
     logInfo "sending Wi-Fi network ${network} to the plug"
     runIn(WIFI_TIMEOUT_SECONDS, "wifiTimeout")
     sendZigbee([frames[0]])
@@ -731,6 +833,7 @@ private void parseWifi(Map descMap) {
             logDebug "FC02/${r.attrId}: ${zclStatus(r.status as String)}"
             return
         }
+        if (r.value == null) return                                   // a type this driver does not decode
         state.wifiSupported = true
         String text = hexToText(r.value as String)
         if (r.attrId == "0000") {
@@ -860,6 +963,7 @@ private void handleSwitch(String hex) {
     if (changed) logInfo text
     if (changed && value == "on") {
         state.onAtMs = now()
+        state.onType = type
         state.peakWatts = 0
     }
     if (changed && value == "off" && type == "physical") checkTrip()
@@ -870,12 +974,14 @@ private void handleSwitch(String hex) {
  * An off the hub did not send, seconds after an on or under a load near the limit, is the plug's own
  * protection (or, rarely, someone at the button). A test plug did this after every on for hours on
  * 2026-10-13 with a ~2 kW load on its 1800 W rating; a rule watching tripCount can stop re-sending on.
+ * A quick off counts only after an on the hub sent, or once some power was seen: three button presses
+ * on 2026-10-15 (on, off, on within 1.4 s, nothing plugged in) are a person, not a trip.
  */
 private void checkTrip() {
     Long onAt = state.onAtMs as Long
     BigDecimal peak = toDecimal(state.peakWatts)
     BigDecimal limit = toDecimal(settings?.powerLimitWatts) > 0 ? toDecimal(settings?.powerLimitWatts) : PLUG_MAX_WATTS
-    boolean quick = onAt != null && now() - onAt <= TRIP_WINDOW_MS
+    boolean quick = onAt != null && now() - onAt <= TRIP_WINDOW_MS && (state.onType == "digital" || peak > 0)
     boolean heavy = peak >= limit * TRIP_LOAD_SHARE
     if (!quick && !heavy) return
     int count = toDecimal(device.currentValue("tripCount")).intValue() + 1
@@ -937,6 +1043,12 @@ private void handleSoftwareBuild(String value, String encoding) {
     String previous = state.firmware as String
     state.firmware = firmware
     if (previous != null && previous != firmware) {
+        Long lastChange = state.firmwareChangedMs as Long
+        if (lastChange != null && now() - lastChange < FIRMWARE_SETTLE_MS) {
+            logDebug "firmware label ${previous} -> ${firmware}; the units were re-read ${Math.round((now() - lastChange) / 1000.0)} s ago"
+            return
+        }
+        state.firmwareChangedMs = now()
         logWarn "firmware changed from ${previous} to ${firmware}; reading the plug's units again"
         state.remove("scale")
         state.remove("fallbackWarned")
@@ -985,6 +1097,8 @@ private void parseCatchall(String cluster, Map descMap) {
                     } else {
                         logDebug "${cluster}/${r.attrId}: ${zclStatus(r.status as String)}"
                     }
+                } else if (r.value == null) {
+                    logDebug "${cluster}/${r.attrId} has type 0x${r.encoding}, which this driver does not decode; the rest of the frame is skipped"
                 } else {
                     handleAttribute(cluster, r.attrId as String, r.encoding as String, r.value as String)
                 }
@@ -1257,14 +1371,21 @@ private static List<Map> decodeAttributeRecords(List<String> d, boolean withStat
         if (i >= d.size()) break
         String encoding = d[i++].toUpperCase()
         int size = zclTypeSize(Integer.parseInt(encoding, 16))
-        if (size == 0 && encoding == "42" && i < d.size()) {
-            int len = Integer.parseInt(d[i++], 16)
+        boolean shortString = encoding == "41" || encoding == "42"          // octet and character strings, 1-byte length
+        boolean longString = encoding == "43" || encoding == "44"           // their long forms, 2-byte length
+        if ((shortString && i < d.size()) || (longString && i + 1 < d.size())) {
+            int len = shortString ? Integer.parseInt(d[i], 16) : (Integer.parseInt(d[i], 16) | (Integer.parseInt(d[i + 1], 16) << 8))
+            i += shortString ? 1 : 2
             int end = Math.min(d.size(), i + len)     // Hubitat may hand over fewer bytes than declared
             out << [attrId: attrId, status: status, encoding: encoding, value: d.subList(i, end).join(""), partial: end < i + len]
             i = end
             continue
         }
-        if (size == 0 || i + size > d.size()) break
+        if (size == 0) {
+            out << [attrId: attrId, status: status, encoding: encoding, value: null]   // a type this driver does not size
+            break
+        }
+        if (i + size > d.size()) break
         // Little-endian on the air; Hubitat's decoded values are big-endian hex.
         out << [attrId: attrId, status: status, encoding: encoding, value: d.subList(i, i + size).reverse().join("").toUpperCase()]
         i += size
@@ -1273,10 +1394,14 @@ private static List<Map> decodeAttributeRecords(List<String> d, boolean withStat
 }
 
 private static int zclTypeSize(int type) {
-    if (type == 0x10 || type == 0x18 || type == 0x20 || type == 0x28 || type == 0x30) return 1
-    if (type == 0x19 || type == 0x21 || type == 0x29 || type == 0x31) return 2
-    if (type >= 0x20 && type <= 0x27) return type - 0x1F
-    if (type >= 0x28 && type <= 0x2F) return type - 0x27
+    if (type == 0x10 || type == 0x30) return 1                       // bool, enum8
+    if (type == 0x31 || type == 0x38) return 2                       // enum16, semi-precision float
+    if (type == 0x39) return 4                                       // single-precision float
+    if (type == 0x3A) return 8                                       // double-precision float
+    if (type >= 0x08 && type <= 0x0F) return type - 0x07             // data8 to data64
+    if (type >= 0x18 && type <= 0x1F) return type - 0x17             // bitmap8 to bitmap64
+    if (type >= 0x20 && type <= 0x27) return type - 0x1F             // uint8 to uint64
+    if (type >= 0x28 && type <= 0x2F) return type - 0x27             // int8 to int64
     return 0
 }
 

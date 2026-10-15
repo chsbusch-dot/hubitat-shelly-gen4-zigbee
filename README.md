@@ -68,12 +68,16 @@ Those corrections would make the new readings wrong. The 1PM driver's leftover a
 | AC frequency offset | 0 Hz | Added to every frequency reading. |
 | After a power cut, the plug turns | keep | Off, on, or back to how it was. "Keep" leaves the plug's own setting alone. Pick "on" only if you want a heater to come back by itself. |
 | Switch off above | empty | The plug's own overpower cutoff, 100 to 1800 W. Empty leaves the plug's setting alone. |
+| LED ring | keep | What the plug's LED shows: a colour that follows the power draw, one colour when on and another when off, or nothing. |
+| LED colour when on, when off | keep | The two colours for the one-colour mode. |
+| LED brightness | empty | 1 to 100 percent. Empty keeps the plug's setting. |
+| LED at night | keep | Dims the LED, or switches it off, between two times of day (22:00 to 06:00 by default). |
 | descriptionText logging | on | One log line per reading. |
 | Debug logging | off | Raw Zigbee messages. Turns itself off after 30 minutes. |
 
-Saving the settings sends the new reporting setup to the plug. The two plug settings go out about 30
-seconds later, one at a time, and only when they differ from what the plug last accepted (see
-[Plug settings](#plug-settings)).
+Saving the settings sends the new reporting setup to the plug. The plug's own settings (power-on state,
+cutoff, LED) go out about 30 seconds later, one at a time, and only when they differ from what the plug
+last accepted (see [Plug settings](#plug-settings)).
 
 ## Attributes
 
@@ -92,7 +96,7 @@ seconds later, one at a time, and only when they differ from what the plug last 
 | `lightLevel` | | `dark`, `twilight` or `bright`, from the plug's light sensor (firmware 2.0.1 and later). |
 | `powerOnState` | | What the plug does after a power cut, when it reports it. |
 | `lastSettingsWrite` | | The outcome of the last plug setting sent: accepted, refused, unconfirmed or not sent. |
-| `bluetooth` | | `on` or `off`, once a setBluetooth command has been accepted. |
+| `bluetooth` | | `on` or `off`, once a setBluetooth command has been accepted. Configure clears it, since a reset plug forgets the setting. |
 | `wifiStatus` | | The plug's Wi-Fi as the plug reports it, for example `connecting` or `got ip`. |
 | `wifiIp` | | The plug's Wi-Fi address, or `none` while it has none. |
 | `wifiNetwork` | | The Wi-Fi network the plug is set to join, or `none`. |
@@ -124,17 +128,18 @@ Refresh afterwards: the driver sees the new firmware and reads the plug's units 
 ## Trips
 
 The plug protects itself: above 15 A (1800 W), or above its own power limit, it switches off. When the
-plug turns itself off within ten seconds of being switched on, or while drawing at least 90% of its
-limit, the driver counts a trip, logs a warning and updates `tripCount` and `lastTrip`. A rule can
-watch `tripCount` and stop switching the plug back on.
+plug turns itself off within ten seconds of the hub switching it on (or of a button press, if it was
+drawing power by then), or while drawing at least 90% of its limit, the driver counts a trip, logs a
+warning and updates `tripCount` and `lastTrip`. A rule can watch `tripCount` and stop switching the plug
+back on. Pressing the plug's button on and off is not a trip.
 
 One plug in testing ran a heater that drew about 2,000 W. It tripped two seconds after every `on`, every
 ten minutes, for hours. If you see trips, the load is too big for the plug.
 
 ## Plug settings
 
-Two settings live in the plug, not in the hub: what it does after a power cut, and its overpower
-cutoff. The driver sends them through Shelly's own channel over Zigbee (or, for the power-on state, the
+Three groups of settings live in the plug, not in the hub: what it does after a power cut, its overpower
+cutoff, and its LED ring. The driver sends them through Shelly's own channel over Zigbee (or, for the power-on state, the
 standard Zigbee attribute when the plug offers it; firmware 2.0.1 does not). Hubitat cuts the plug's
 replies short, but enough of each reply arrives to tell an accepted setting from a refused one; the
 result shows in `lastSettingsWrite`. A setting that comes back refused or unconfirmed is tried again the
