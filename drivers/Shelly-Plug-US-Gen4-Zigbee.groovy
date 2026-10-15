@@ -36,13 +36,15 @@
  *                    request chunks wait for the plug's acknowledgement, an unanswered write is asked
  *                    once more (WOR-780)
  * 1.3.0  2026-10-15  setWifi command, wifiStatus and wifiIp, over Shelly's Wi-Fi setup cluster (WOR-781)
+ * 1.3.1  2026-10-15  setWifi no longer writes DHCP (read-only on the plug, which refused the whole setup);
+ *                    0.0.0.0 counts as no Wi-Fi address; wifiNetwork shows the network the plug is set to join
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.3.0" }
+static String driverVersion() { "1.3.1" }
 
 metadata {
     definition(
@@ -73,6 +75,7 @@ metadata {
         attribute "lastTrip",     "string"
         attribute "wifiStatus",   "string"
         attribute "wifiIp",       "string"
+        attribute "wifiNetwork",  "string"
 
         command "identify", [[name: "seconds", type: "NUMBER", description: "How long the LED blinks (1 to 600, default 10)"]]
         command "setBluetooth", [[name: "state", type: "ENUM", constraints: ["on", "off"],
@@ -630,7 +633,9 @@ void setWifi(String network, String password = null) {
         wifiOutcome(network, "not sent", "a password has 8 to 63 characters; leave it empty for an open network")
         return
     }
-    List<String> frames = [wifiWrite(boolRecord(0x0004, true) + boolRecord(0x0003, true) + textRecord(0x0005, name))]  // enable, DHCP, SSID
+    // Enable and SSID, as Zigbee2MQTT writes them. Not DHCP: 4613 answered READ_ONLY (0x88) for 0x0003 on
+    // 2026-10-15, and the plug uses DHCP unless given a static address.
+    List<String> frames = [wifiWrite(boolRecord(0x0004, true) + textRecord(0x0005, name))]
     if (pass.length > 0) frames << wifiWrite(textRecord(0x0006, pass))                                                // password
     frames << wifiWrite(attrLe(0x0002) + "20" + "01")                                                               // Action 1: apply
     WIFI_FRAMES.put(device.deviceNetworkId as String, new ArrayList<String>(frames.subList(1, frames.size())))
@@ -678,7 +683,7 @@ void wifiRead() {
 private List<String> wifiReads() {
     List<String> cmds = []
     if (state.wifiPending == null) cmds += [wifiWrite(attrLe(0x0002) + "20" + "00"), "delay 500"]
-    cmds << shellyFrame("0xFC02", "00", attrLe(0x0000) + attrLe(0x0001))
+    cmds << shellyFrame("0xFC02", "00", attrLe(0x0000) + attrLe(0x0001) + attrLe(0x0005))                  // Status, IP, SSID
     return cmds
 }
 
@@ -733,13 +738,18 @@ private void parseWifi(Map descMap) {
             if (device.currentValue("wifiStatus") != v) logInfo "Wi-Fi status: ${v}"
             sendEvent(name: "wifiStatus", value: v)
         } else if (r.attrId == "0001") {
-            String v = text ?: "none"
+            boolean known = text && text != "0.0.0.0"                     // 4613 reported 0.0.0.0 while connecting
+            String v = known ? text : "none"
             if (device.currentValue("wifiIp") != v) logInfo "Wi-Fi address: ${v}"
             sendEvent(name: "wifiIp", value: v)
-            if (text) {
+            if (known) {
                 state.remove("wifiReadsLeft")
                 unschedule("wifiRead")
             }
+        } else if (r.attrId == "0005") {
+            String v = text ?: "none"
+            if (device.currentValue("wifiNetwork") != v) logInfo "Wi-Fi network: ${v}"
+            sendEvent(name: "wifiNetwork", value: v)
         }
     }
 }
@@ -1279,6 +1289,7 @@ private static String zclStatus(String hex) {
         case "8C": return "unreportable attribute"
         case "8D": return "invalid data type"
         case "87": return "invalid value"
+        case "88": return "read-only attribute"
         case "81": return "unsupported command"
         default:   return "status 0x${hex}"
     }

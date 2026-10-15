@@ -94,7 +94,8 @@ seconds later, one at a time, and only when they differ from what the plug last 
 | `lastSettingsWrite` | | The outcome of the last plug setting sent: accepted, refused, unconfirmed or not sent. |
 | `bluetooth` | | `on` or `off`, once a setBluetooth command has been accepted. |
 | `wifiStatus` | | The plug's Wi-Fi as the plug reports it, for example `connecting` or `got ip`. |
-| `wifiIp` | | The plug's Wi-Fi address, or `none`. |
+| `wifiIp` | | The plug's Wi-Fi address, or `none` while it has none. |
+| `wifiNetwork` | | The Wi-Fi network the plug is set to join, or `none`. |
 | `powerFactor` | | Only on firmware that offers it; 2.0.1 does not. |
 
 ## Commands
