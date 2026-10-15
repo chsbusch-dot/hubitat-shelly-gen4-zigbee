@@ -50,13 +50,17 @@
  *                    the optional features again; network names decode as UTF-8 (WOR-793)
  * 1.4.2  2026-10-15  a 0 W report right before an off no longer hides a trip; a stale Wi-Fi error no longer cancels a
  *                    setup that has not started yet (WOR-793)
+ * 1.4.3  2026-10-15  trips judged on the recent load and the confirmed cutoff; a tail-only RPC success must match the
+ *                    reply length; a cutoff needs a power reading since the last switch-on, in the plug's own watts;
+ *                    default responses to reads are not refusals; each acknowledged chunk restarts the write timeout;
+ *                    only 00 and 01 are switch states (WOR-793)
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.4.2" }
+static String driverVersion() { "1.4.3" }
 
 metadata {
     definition(
@@ -175,8 +179,8 @@ metadata {
 // An off the hub did not send, this soon after an on or at this share of the power limit, is a trip.
 @Field static final Long TRIP_WINDOW_MS = 10000L
 @Field static final BigDecimal TRIP_LOAD_SHARE = 0.9
-// A reading this far below the peak since switch-on ends that high load (1700 W, then minutes at 50 W, is idle),
-// unless the plug switches off within the grace time of it: a protection trip reports 0 W right before off.
+// A reading this far below the one before it is a drop. A drop within the grace time of an off is the plug
+// cutting its load (a protection trip reports 0 W right before off), so the reading before it is the load.
 @Field static final BigDecimal TRIP_PEAK_DECAY = 0.5
 @Field static final Long TRIP_DROP_GRACE_MS = 15000L
 @Field static final Integer PLUG_MAX_WATTS = 1800
@@ -437,11 +441,20 @@ void setBluetooth(String onOff) {
 
 /** Why a cutoff must not go out right now, or null: the plug draws near or above it, or its draw is unknown. */
 private String powerLimitBlocker(Integer limit) {
-    def reading = device.currentValue("power")
-    if (reading == null) return limit < PLUG_MAX_WATTS ? "the plug has not reported its power draw yet; refresh, then save again" : null
-    BigDecimal drawing = toDecimal(reading)
+    if (limit >= PLUG_MAX_WATTS) return null                                   // the maximum cannot undercut a load
+    Long lastMs = state.lastWattsMs as Long
+    if (lastMs == null) return "the plug has not reported its power draw yet; refresh, then save again"
+    Long onAt = state.onAtMs as Long
+    if (device.currentValue("switch") == "on" && onAt != null && lastMs < onAt) return "no power reading since the plug was switched on; refresh, then save again"
+    BigDecimal drawing = toDecimal(state.lastWatts)                            // the plug's own watts, not the adjusted display
     if (drawing >= limit * TRIP_LOAD_SHARE) return "the plug is drawing ${drawing} W and would switch itself off"
     return null
+}
+
+/** The cutoff the plug confirmed, or its maximum; a preference it refused or has not received yet does not count. */
+private BigDecimal acceptedPowerLimit() {
+    def accepted = ((state.plugSettings ?: [:]) as Map).power_limit
+    return accepted != null ? toDecimal(accepted) : PLUG_MAX_WATTS
 }
 
 /** A retry repeats a settings write: not once the preference moved on, and never a cutoff the load forbids now. */
@@ -584,9 +597,11 @@ private void rpcWriteAcked() {
     int sent = (pending.sent ?: 0) as int
     if (sent > chunks.size()) return                                            // a duplicate acknowledgement
     pending.sent = sent + 1
+    pending.at = now()                                                          // progress: the write is alive
     state.rpcPending = pending
     if (sent < chunks.size()) {
         sendZigbee([rpcFrame("02", chunks[sent])])
+        runIn(RPC_TIMEOUT_SECONDS, "rpcTimeout")                                // each acknowledged chunk restarts the clock
     } else {
         runIn(2, "rpcPoll")
         runIn(RPC_TIMEOUT_SECONDS, "rpcTimeout")                                // the polls get their full time
@@ -661,7 +676,10 @@ private void parseRpc(Map descMap) {
         return
     }
     if (command == "0B") {
-        if (d.size() >= 2 && d[1] != "00") rpcResult("refused", "the plug answered ${zclStatus(d[1])}")
+        if (d.size() >= 2 && d[1] != "00") {
+            if (d[0] == "02") rpcResult("refused", "the plug answered ${zclStatus(d[1])}")   // to a write of ours
+            else logDebug "RPC: command ${d[0]} answered ${zclStatus(d[1])}"              // a read; the next poll asks again
+        }
         return
     }
     if (command != "01" && command != "0A") return
@@ -669,7 +687,13 @@ private void parseRpc(Map descMap) {
         if (r.status != "00") {
             logDebug "RPC ${r.attrId}: ${zclStatus(r.status as String)}"
         } else if (r.attrId == "0002" && r.value) {
-            logDebug "RPC reply length ${Long.parseLong(r.value as String, 16)}"
+            long len = Long.parseLong(r.value as String, 16)
+            logDebug "RPC reply length ${len}"
+            Map pending = state.rpcPending as Map
+            if (pending != null && len > 0) {
+                pending.replyLength = len
+                state.rpcPending = pending
+            }
         } else if (r.attrId == "0000") {
             handleRpcChunk(hexToText(r.value as String))
         }
@@ -719,7 +743,7 @@ private void handleRpcChunk(String text) {
     // earlier, on the quote before it (2026-10-15, id 14). Then the tail tells: a SetConfig result
     // carries restart_required, an error carries its code.
     boolean refused = reply.contains('"error"') || (head =~ /"src":"[^"]*","e/).find() || tail.contains('"code":')
-    boolean accepted = reply.contains('"result"') || (head =~ /"src":"[^"]*","r/).find() || tail.contains('restart_required')
+    boolean accepted = reply.contains('"result"') || (head =~ /"src":"[^"]*","r/).find() || (tail.contains('restart_required') && successLengthMatches(head, pending))
     if (refused) {
         def code = reply =~ /"code":(-?\d+)/
         rpcResult("refused", code.find() ? "error ${code.group(1)}" : "error, its code cut off")
@@ -728,6 +752,20 @@ private void handleRpcChunk(String text) {
     } else {
         logDebug "RPC reply not judged yet: ${reply}"
     }
+}
+
+/**
+ * A tail alone says "result" only when the reply length the plug reported is exactly what a SetConfig success
+ * for this request id and this plug measures (restart_required false or true). An error reply is far longer,
+ * and a stale tail of an earlier reply must not confirm the request after it (2026-10-15 review).
+ */
+private static boolean successLengthMatches(String head, Map pending) {
+    Long len = pending.replyLength as Long
+    def id = head =~ /^\{"id":(\d+)/
+    def src = head =~ /"src":"([^"]*)"/
+    if (len == null || !id.find() || !src.find()) return false
+    int success = '{"id":'.length() + id.group(1).length() + ',"src":"'.length() + src.group(1).length() + '","result":{"restart_required":false}}'.length()
+    return len == success || len == success - 1
 }
 
 private static String le32(int n) {
@@ -892,7 +930,8 @@ private void parseWifi(Map descMap) {
     if (command == "0B") {
         if (d.size() >= 2 && d[1] != "00") {
             if (d[1] == "C3") state.wifiSupported = false
-            if (wifiSetupActive()) wifiFinish("refused", "the plug answered ${zclStatus(d[1])}")
+            if (d[0] == "02" && wifiSetupActive()) wifiFinish("refused", "the plug answered ${zclStatus(d[1])}")
+            else logDebug "FC02: command ${d[0]} answered ${zclStatus(d[1])}"
         }
         return
     }
@@ -1023,10 +1062,12 @@ private void handleAttribute(String cluster, String attrId, String encoding, Str
 
 private void handleSwitch(String hex) {
     String value
-    try {
-        value = Integer.parseInt(hex, 16) == 0 ? "off" : "on"
-    } catch (NumberFormatException ignored) {
-        return
+    switch (hex?.toUpperCase()) {
+        case "00": value = "off"; break
+        case "01": value = "on"; break
+        default:
+            logDebug "switch: ${hex} is not an on/off value, ignored"
+            return
     }
     String type = "physical"
     Map pending = state.pendingSwitch as Map
@@ -1041,7 +1082,6 @@ private void handleSwitch(String hex) {
         state.onAtMs = now()
         state.onType = type
         state.peakWatts = 0
-        state.remove("lowSinceMs")
     }
     if (changed && value == "off" && type == "physical") checkTrip()
     sendEvent(name: "switch", value: value, type: type, descriptionText: text)
@@ -1057,14 +1097,21 @@ private void handleSwitch(String hex) {
 private void checkTrip() {
     Long onAt = state.onAtMs as Long
     BigDecimal peak = toDecimal(state.peakWatts)
-    BigDecimal limit = toDecimal(settings?.powerLimitWatts) > 0 ? toDecimal(settings?.powerLimitWatts) : PLUG_MAX_WATTS
+    BigDecimal limit = acceptedPowerLimit()
     boolean quick = onAt != null && now() - onAt <= TRIP_WINDOW_MS && (state.onType == "digital" || peak > 0)
-    Long lowSince = state.lowSinceMs as Long
-    boolean heavy = peak >= limit * TRIP_LOAD_SHARE && (lowSince == null || now() - lowSince <= TRIP_DROP_GRACE_MS)
+    // The load the plug carried: its latest reading, or the one before when the latest is the drop to (near)
+    // nothing that a protection trip reports moments before the off. An old reading is not refreshed by the
+    // off, so a heater that fell to 50 W minutes ago is judged at 50 W, whatever it drew before.
+    BigDecimal load = toDecimal(state.lastWatts)
+    BigDecimal prev = toDecimal(state.prevWatts)
+    Long lastMs = state.lastWattsMs as Long
+    if (lastMs != null && now() - lastMs <= TRIP_DROP_GRACE_MS && load < prev * TRIP_PEAK_DECAY) load = prev
+    boolean heavy = load >= limit * TRIP_LOAD_SHARE
     if (!quick && !heavy) return
+    BigDecimal shown = quick ? peak : load
     int count = toDecimal(device.currentValue("tripCount")).intValue() + 1
     String when = quick ? "${Math.round((now() - onAt) / 1000.0)} s after it was switched on" : "under load"
-    String text = "switched itself off ${when}, at up to ${peak.setScale(0, BigDecimal.ROUND_HALF_UP)} W (limit ${limit} W): likely its overcurrent or overpower protection"
+    String text = "switched itself off ${when}, at up to ${shown.setScale(0, BigDecimal.ROUND_HALF_UP)} W (limit ${limit} W): likely its overcurrent or overpower protection"
     logWarn "${text}"
     sendEvent(name: "tripCount", value: count, descriptionText: "${device.displayName} ${text}")
     sendEvent(name: "lastTrip", value: text, isStateChange: true)
@@ -1078,19 +1125,18 @@ private void handleMeasurement(String q, String hex, String encoding) {
         return
     }
     Map sc = scaleOf(q)
-    BigDecimal value = new BigDecimal(raw).multiply(new BigDecimal(sc.mult as Long))
+    BigDecimal exact = new BigDecimal(raw).multiply(new BigDecimal(sc.mult as Long))
                                           .divide(new BigDecimal(sc.div as Long), 6, BigDecimal.ROUND_HALF_UP)
-    value = adjust(q, value).setScale(d.decimals as Integer, BigDecimal.ROUND_HALF_UP)
+    BigDecimal plain = exact.setScale(d.decimals as Integer, BigDecimal.ROUND_HALF_UP)
+    BigDecimal value = adjust(q, exact).setScale(d.decimals as Integer, BigDecimal.ROUND_HALF_UP)
     String text = "${device.displayName} ${d.event} is ${value} ${d.unit}"
     if (device.currentValue(d.event as String)?.toString() != value.toString()) logInfo text
-    if (q == "power" && device.currentValue("switch") == "on") {
-        BigDecimal peak = toDecimal(state.peakWatts)
-        if (value > peak) state.peakWatts = value
-        if (value < peak * TRIP_PEAK_DECAY) {
-            if (state.lowSinceMs == null) state.lowSinceMs = now()   // the high load ended here, unless off follows at once
-        } else {
-            state.remove("lowSinceMs")
-        }
+    if (q == "power") {
+        // The plug's own watts, before any adjustment: its protection and the cutoff go by these.
+        state.prevWatts = state.lastWatts ?: 0
+        state.lastWatts = plain
+        state.lastWattsMs = now()
+        if (device.currentValue("switch") == "on" && plain > toDecimal(state.peakWatts)) state.peakWatts = plain
     }
     sendEvent(name: d.event, value: value, unit: d.unit, descriptionText: text)
 }

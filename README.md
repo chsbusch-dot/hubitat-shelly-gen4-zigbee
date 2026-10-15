@@ -129,7 +129,7 @@ Refresh afterwards: the driver sees the new firmware and reads the plug's units 
 
 The plug protects itself: above 15 A (1800 W), or above its own power limit, it switches off. When the
 plug turns itself off within ten seconds of the hub switching it on (or of a button press, if it was
-drawing power by then), or while drawing at least 90% of its limit, the driver counts a trip, logs a
+drawing power by then), or while its recent load was at least 90% of the cutoff the plug confirmed (1800 W unless you set one), the driver counts a trip, logs a
 warning and updates `tripCount` and `lastTrip`. A rule can watch `tripCount` and stop switching the plug
 back on. Pressing the plug's button on and off is not a trip.
 
