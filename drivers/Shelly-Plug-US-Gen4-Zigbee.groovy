@@ -20,6 +20,7 @@
  *
  * Shelly's RPC channel over Zigbee (cluster 0xFC01) is used only to write optional settings (power
  * limit, power-on state, Bluetooth); readings never depend on it, because Hubitat cuts its replies short.
+ * Shelly's Wi-Fi setup cluster (0xFC02) gives the plug a network, which its firmware updates need.
  *
  * The attribute map and the parse structure follow the "Shelly 1PM Gen 4 Zigbee Driver" by joaomf and
  * kkossev (Apache-2.0, https://github.com/joaomf/hubitat). See NOTICE.
@@ -34,13 +35,14 @@
  * 1.2.0  2026-10-15  setBluetooth command, for the Shelly app (Wi-Fi setup, firmware updates); RPC
  *                    request chunks wait for the plug's acknowledgement, an unanswered write is asked
  *                    once more (WOR-780)
+ * 1.3.0  2026-10-15  setWifi command, wifiStatus and wifiIp, over Shelly's Wi-Fi setup cluster (WOR-781)
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.2.0" }
+static String driverVersion() { "1.3.0" }
 
 metadata {
     definition(
@@ -69,10 +71,14 @@ metadata {
         attribute "powerFactor",  "number"
         attribute "tripCount",    "number"
         attribute "lastTrip",     "string"
+        attribute "wifiStatus",   "string"
+        attribute "wifiIp",       "string"
 
         command "identify", [[name: "seconds", type: "NUMBER", description: "How long the LED blinks (1 to 600, default 10)"]]
         command "setBluetooth", [[name: "state", type: "ENUM", constraints: ["on", "off"],
                                   description: "Bluetooth on the plug; the Shelly app needs it for Wi-Fi setup and firmware updates"]]
+        command "setWifi", [[name: "network*", type: "STRING", description: "Wi-Fi network name (SSID)"],
+                            [name: "password", type: "STRING", description: "Wi-Fi password, empty for an open network. Sent to the plug only; the driver does not log or store it"]]
 
         // As the hub recorded them: joined on firmware 02000021 (no out clusters listed), and the
         // simple descriptor of firmware 2.0.1 (1490-1852-020001FF), which adds Shelly's cluster FC21.
@@ -150,6 +156,16 @@ metadata {
 @Field static final Integer RPC_ATTEMPTS = 2
 @Field static final Integer POWER_LIMIT_MIN = 100
 @Field static final Integer RPC_TIMEOUT_SECONDS = 25
+
+// Shelly's Wi-Fi setup over Zigbee: cluster FC02 on endpoint 0xEF, profile 0xC001 (Shelly's Zigbee docs,
+// Zigbee2MQTT's shellyWiFiSetup). Writes stage the station settings, Action 1 applies them and Action 0
+// resets the staged values to what the plug runs; Status and IP are character strings. Firmware updates
+// come over Wi-Fi only: Zigbee2MQTT offers no Zigbee OTA for this plug.
+@Field static final Integer WIFI_TIMEOUT_SECONDS = 30
+@Field static final Integer WIFI_READS = 4
+// The frames of a setWifi carry the password, so they wait here, in memory, while the plug acknowledges
+// them one by one: never in state, which the device page shows and the hub stores.
+@Field static final java.util.concurrent.ConcurrentHashMap<String, List<String>> WIFI_FRAMES = new java.util.concurrent.ConcurrentHashMap<String, List<String>>()
 @Field static final Map RPC_INITIAL_STATE = ["off": "off", "on": "on", "previous": "restore_last"]   // "keep" is absent: never sent
 @Field static final Map START_UP_ON_OFF = ["off": 0x00, "on": 0x01, "previous": 0xFF]
 
@@ -181,7 +197,7 @@ List<String> configure() {
     log.info "${device.displayName}: configuring (driver ${driverVersion()}); the relay is not switched"
     migrateFromOtherDrivers()
     state.remove("fallbackWarned")
-    ["plugSettings", "settingsSkip", "startUpOnOff", "powerFactorSupported", "lightLevelSupported"].each { state.remove(it) }
+    ["plugSettings", "settingsSkip", "startUpOnOff", "powerFactorSupported", "lightLevelSupported", "wifiSupported"].each { state.remove(it) }
     scheduleHousekeeping()
     List<String> cmds = []
     cmds += zigbee.readAttribute(0x0000, 0x4000)      // software build, to notice a firmware change
@@ -200,6 +216,7 @@ List<String> refresh() {
     cmds += zigbee.readAttribute(0x0702, 0x0000)
     if (state.powerFactorSupported == true) cmds += zigbee.readAttribute(0x0B04, 0x0510)
     if (state.lightLevelSupported == true) cmds += zigbee.readAttribute(0xFC21, 0x0000, [mfgCode: MFG_SHELLY])
+    if (state.wifiSupported != false) cmds += wifiReads()
     cmds += zigbee.readAttribute(0x0000, 0x4000)
     if (!scaleComplete()) cmds += scaleReads()
     return cmds
@@ -491,10 +508,15 @@ private void rpcResult(String result, String detail) {
 }
 
 private String rpcFrame(String command, String body) {
+    return shellyFrame("0xFC01", command, body)
+}
+
+/** A manufacturer-specific ZCL frame to one of Shelly's clusters on endpoint 0xEF (profile 0xC001). */
+private String shellyFrame(String cluster, String command, String body) {
     int seq = (((state.zclSeq ?: 0) as int) + 1) & 0xFF   // ZCL transaction number, not the RPC id
     state.zclSeq = seq
     String mfg = String.format("%02X%02X", MFG_SHELLY & 0xFF, (MFG_SHELLY >> 8) & 0xFF)
-    return "he raw 0x${device.deviceNetworkId} 1 0xEF 0xFC01 {04${mfg}${String.format('%02X', seq)}${command}${body}} {0xC001}".toString()
+    return "he raw 0x${device.deviceNetworkId} 1 0xEF ${cluster} {04${mfg}${String.format('%02X', seq)}${command}${body}} {0xC001}".toString()
 }
 
 /** FC01 frames: write and default responses to the request, read responses with the reply. */
@@ -585,6 +607,159 @@ private static String hexToText(String hex) {
     return sb.toString()
 }
 
+// --------------------------------------------------------------------------- Wi-Fi (cluster FC02)
+
+/**
+ * Gives the plug a Wi-Fi network through Shelly's Wi-Fi setup cluster, so it can fetch firmware updates
+ * (from the Shelly app or the plug's own web page, once it has an address). The password goes to the
+ * plug and nowhere else: no log line, event or state holds it. An empty password is an open network.
+ * Each write waits for the plug to acknowledge the one before; Action 1 goes last. The relay is not touched.
+ */
+void setWifi(String network, String password = null) {
+    byte[] name = (network ?: "").getBytes("UTF-8")
+    byte[] pass = (password ?: "").getBytes("UTF-8")
+    if (state.wifiPending != null) {
+        wifiOutcome(network, "not sent", "another Wi-Fi write is in progress; try again in a minute")
+        return
+    }
+    if (name.length < 1 || name.length > 32) {
+        wifiOutcome(network, "not sent", "the network name must be 1 to 32 bytes")
+        return
+    }
+    if (pass.length != 0 && (pass.length < 8 || pass.length > 63)) {
+        wifiOutcome(network, "not sent", "a password has 8 to 63 characters; leave it empty for an open network")
+        return
+    }
+    List<String> frames = [wifiWrite(boolRecord(0x0004, true) + boolRecord(0x0003, true) + textRecord(0x0005, name))]  // enable, DHCP, SSID
+    if (pass.length > 0) frames << wifiWrite(textRecord(0x0006, pass))                                                // password
+    frames << wifiWrite(attrLe(0x0002) + "20" + "01")                                                               // Action 1: apply
+    WIFI_FRAMES.put(device.deviceNetworkId as String, new ArrayList<String>(frames.subList(1, frames.size())))
+    state.wifiPending = [network: network]
+    logInfo "sending Wi-Fi network ${network} to the plug"
+    runIn(WIFI_TIMEOUT_SECONDS, "wifiTimeout")
+    sendZigbee([frames[0]])
+}
+
+/** The plug acknowledged one Wi-Fi write: send the next one, or after Action 1 read back how it connects. */
+private void wifiWriteAcked() {
+    Map pending = state.wifiPending as Map
+    if (pending == null) return
+    String key = device.deviceNetworkId as String
+    List<String> rest = WIFI_FRAMES.get(key)
+    if (rest == null) return                                          // the hub restarted mid-way; wifiTimeout reports it
+    if (!rest.isEmpty()) {
+        WIFI_FRAMES.put(key, new ArrayList<String>(rest.subList(1, rest.size())))
+        sendZigbee([rest[0]])
+        return
+    }
+    wifiFinish("accepted", "wifiStatus and wifiIp show when it has joined")
+    state.wifiReadsLeft = WIFI_READS
+    runIn(10, "wifiRead")
+}
+
+void wifiTimeout() {
+    if (state.wifiPending == null) return
+    wifiFinish("unconfirmed", "not every write was acknowledged in ${WIFI_TIMEOUT_SECONDS} s; run setWifi again")
+}
+
+/** Reads Status and IP a few times after a setWifi, until the plug has an address. */
+void wifiRead() {
+    int left = ((state.wifiReadsLeft ?: 0) as int) - 1
+    if (left > 0) {
+        state.wifiReadsLeft = left
+        runIn(15, "wifiRead")
+    } else {
+        state.remove("wifiReadsLeft")
+    }
+    sendZigbee(wifiReads())
+}
+
+/** Action 0 first, as Zigbee2MQTT does, so the attributes show what the plug runs; never during a setWifi. */
+private List<String> wifiReads() {
+    List<String> cmds = []
+    if (state.wifiPending == null) cmds += [wifiWrite(attrLe(0x0002) + "20" + "00"), "delay 500"]
+    cmds << shellyFrame("0xFC02", "00", attrLe(0x0000) + attrLe(0x0001))
+    return cmds
+}
+
+private void wifiFinish(String result, String detail) {
+    Map pending = (state.wifiPending ?: [:]) as Map
+    state.remove("wifiPending")
+    unschedule("wifiTimeout")
+    WIFI_FRAMES.remove(device.deviceNetworkId as String)
+    wifiOutcome(pending.network as String, result, detail)
+}
+
+private void wifiOutcome(String network, String result, String detail) {
+    String text = "Wi-Fi${network ? ' ' + network : ''}: ${result}${detail ? ' (' + detail + ')' : ''}"
+    if (result == "accepted") {
+        logInfo text
+    } else {
+        logWarn text
+    }
+    sendEvent(name: "lastSettingsWrite", value: text)
+}
+
+/** FC02 frames: write responses to a setWifi, read responses with Status and IP. */
+private void parseWifi(Map descMap) {
+    String command = (descMap.command as String)?.toUpperCase()
+    List<String> d = (descMap.data ?: []) as List<String>
+    if (command == "04") {
+        if (d && d[0] != "00") {
+            if (state.wifiPending != null) wifiFinish("refused", "attribute ${d.size() >= 3 ? d[2] + d[1] : '?'}: ${zclStatus(d[0])}")
+        } else {
+            wifiWriteAcked()
+        }
+        return
+    }
+    if (command == "0B") {
+        if (d.size() >= 2 && d[1] != "00") {
+            if (d[1] == "C3") state.wifiSupported = false
+            if (state.wifiPending != null) wifiFinish("refused", "the plug answered ${zclStatus(d[1])}")
+        }
+        return
+    }
+    if (command != "01" && command != "0A") return
+    decodeAttributeRecords(d, command == "01").each { Map r ->
+        if (r.status != "00") {
+            if (r.status == "86" || r.status == "C3") state.wifiSupported = false
+            logDebug "FC02/${r.attrId}: ${zclStatus(r.status as String)}"
+            return
+        }
+        state.wifiSupported = true
+        String text = hexToText(r.value as String)
+        if (r.attrId == "0000") {
+            String v = text ?: "unknown"
+            if (device.currentValue("wifiStatus") != v) logInfo "Wi-Fi status: ${v}"
+            sendEvent(name: "wifiStatus", value: v)
+        } else if (r.attrId == "0001") {
+            String v = text ?: "none"
+            if (device.currentValue("wifiIp") != v) logInfo "Wi-Fi address: ${v}"
+            sendEvent(name: "wifiIp", value: v)
+            if (text) {
+                state.remove("wifiReadsLeft")
+                unschedule("wifiRead")
+            }
+        }
+    }
+}
+
+private String wifiWrite(String records) {
+    return shellyFrame("0xFC02", "02", records)
+}
+
+private static String attrLe(int id) {
+    return String.format("%02X%02X", id & 0xFF, (id >> 8) & 0xFF)
+}
+
+private static String boolRecord(int id, boolean v) {
+    return attrLe(id) + "10" + (v ? "01" : "00")
+}
+
+private static String textRecord(int id, byte[] b) {
+    return attrLe(id) + "42" + String.format("%02X", b.length) + hexOf(b, 0, b.length)
+}
+
 // --------------------------------------------------------------------------- parse
 
 def parse(String description) {
@@ -599,6 +774,10 @@ def parse(String description) {
     String cluster = ((descMap.cluster ?: descMap.clusterId) as String)?.toUpperCase()
     if (cluster == "FC01") {
         parseRpc(descMap)
+        return null
+    }
+    if (cluster == "FC02") {
+        parseWifi(descMap)
         return null
     }
     if (descMap.attrId != null) {
@@ -849,6 +1028,7 @@ private List<String> optionalReads() {
     cmds += zigbee.readAttribute(0x0006, 0x4003)                                          // StartUpOnOff
     cmds += zigbee.readAttribute(0x0B04, 0x0510)                                          // PowerFactor
     cmds += zigbee.readAttribute(0xFC21, [0x0000, 0x0001, 0x0002], [mfgCode: MFG_SHELLY])  // listed since fw 2.0.1
+    cmds += wifiReads()
     return cmds
 }
 
