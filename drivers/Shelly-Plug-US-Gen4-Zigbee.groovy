@@ -43,13 +43,18 @@
  *                    needs a hub-sent on or some load; a write that never finished expires; an RPC retry keeps its id and
  *                    chunks before the first poll are ignored; a firmware change is noticed once; Configure forgets the
  *                    Bluetooth attribute; more ZCL types decoded (WOR-786)
+ * 1.4.1  2026-10-15  Review fixes: a cutoff is re-checked against the load before every attempt and not sent while
+ *                    the draw is unknown; Wi-Fi setup waits for a quiet channel and ignores stray acknowledgements;
+ *                    a feature reported late gets its reporting; a refused power-on write stays on RPC; a trip under
+ *                    load uses the recent load; an empty Wi-Fi password clears the old one; a firmware change probes
+ *                    the optional features again; network names decode as UTF-8 (WOR-793)
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.4.0" }
+static String driverVersion() { "1.4.1" }
 
 metadata {
     definition(
@@ -168,6 +173,8 @@ metadata {
 // An off the hub did not send, this soon after an on or at this share of the power limit, is a trip.
 @Field static final Long TRIP_WINDOW_MS = 10000L
 @Field static final BigDecimal TRIP_LOAD_SHARE = 0.9
+// A reading this far below the peak since switch-on ends that high load: 1700 W then minutes at 50 W is idle.
+@Field static final BigDecimal TRIP_PEAK_DECAY = 0.5
 @Field static final Integer PLUG_MAX_WATTS = 1800
 @Field static final Long RX_STAMP_EVERY_MS = 60000L
 @Field static final Long COMMAND_ECHO_MS = 10000L
@@ -194,6 +201,8 @@ metadata {
 // come over Wi-Fi only: Zigbee2MQTT offers no Zigbee OTA for this plug.
 @Field static final Integer WIFI_TIMEOUT_SECONDS = 30
 @Field static final Integer WIFI_READS = 4
+// A write response on FC02 names no attribute, so a setup starts only once the channel has been quiet this long.
+@Field static final Long WIFI_QUIET_MS = 10000L
 // The frames of a setWifi carry the password, so they wait here, in memory, while the plug acknowledges
 // them one by one: never in state, which the device page shows and the hub stores.
 @Field static final java.util.concurrent.ConcurrentHashMap<String, List<String>> WIFI_FRAMES = new java.util.concurrent.ConcurrentHashMap<String, List<String>>()
@@ -228,7 +237,7 @@ List<String> configure() {
     log.info "${device.displayName}: configuring (driver ${driverVersion()}); the relay is not switched"
     migrateFromOtherDrivers()
     state.remove("fallbackWarned")
-    ["plugSettings", "settingsSkip", "startUpOnOff", "powerFactorSupported", "lightLevelSupported", "wifiSupported"].each { state.remove(it) }
+    ["plugSettings", "settingsSkip", "startUpOnOff", "startUpWritable", "powerFactorSupported", "lightLevelSupported", "wifiSupported"].each { state.remove(it) }
     try {
         device.deleteCurrentState("bluetooth")        // what the driver last sent, not what a reset plug has
     } catch (Exception ignored) {
@@ -380,13 +389,13 @@ void applyPlugSettings() {
     Map todo = pendingPlugSettings()
     if (!todo) return
     if (todo.power_limit != null) {
-        BigDecimal drawing = toDecimal(device.currentValue("power"))
-        if (drawing >= (todo.power_limit as BigDecimal) * TRIP_LOAD_SHARE) {
-            settingsOutcome("power_limit", todo.power_limit, "not sent", "the plug is drawing ${drawing} W and would switch itself off")
+        String blocker = powerLimitBlocker(todo.power_limit as Integer)
+        if (blocker) {
+            settingsOutcome("power_limit", todo.power_limit, "not sent", blocker)
             return
         }
     }
-    if (todo.initial_state != null && state.startUpOnOff == true) {
+    if (todo.initial_state != null && state.startUpOnOff == true && state.startUpWritable != false) {
         logInfo "setting the power-on state to ${todo.initial_state} (0006/4003)"
         state.startUpPending = [value: todo.initial_state, at: now()]
         List<String> cmds = []
@@ -420,6 +429,24 @@ void setBluetooth(String onOff) {
     logInfo "turning Bluetooth ${v}"
     Map config = v == "on" ? [enable: true, rpc: [enable: true]] : [enable: false]
     sendRpc("BLE.SetConfig", [config: config], "bluetooth", v)
+}
+
+/** Why a cutoff must not go out right now, or null: the plug draws near or above it, or its draw is unknown. */
+private String powerLimitBlocker(Integer limit) {
+    def reading = device.currentValue("power")
+    if (reading == null) return limit < PLUG_MAX_WATTS ? "the plug has not reported its power draw yet; refresh, then save again" : null
+    BigDecimal drawing = toDecimal(reading)
+    if (drawing >= limit * TRIP_LOAD_SHARE) return "the plug is drawing ${drawing} W and would switch itself off"
+    return null
+}
+
+/** A retry repeats a settings write: not once the preference moved on, and never a cutoff the load forbids now. */
+private String retryBlocker(Map pending) {
+    String key = pending.key as String
+    if (key == "bluetooth") return null
+    if (pendingPlugSettings()[key] != pending.value) return "the setting changed before the retry"
+    if (key == "power_limit") return powerLimitBlocker(pending.value as Integer)
+    return null
 }
 
 /** Preferences that differ from what the plug accepted, minus those already refused this round. */
@@ -497,7 +524,7 @@ private void startUpRefused(String detail) {
     if (pending == null) return
     state.remove("startUpPending")
     unschedule("startUpTimeout")
-    state.startUpOnOff = false
+    state.startUpWritable = false                  // it still reads fine; handlePowerOnState must not undo this
     settingsOutcome("initial_state", pending.value, "refused", "${detail}; trying RPC", false)
 }
 
@@ -582,6 +609,11 @@ void rpcTimeout() {
     Map pending = state.rpcPending as Map
     if (pending == null) return
     if (((pending.attempt ?: 1) as int) < RPC_ATTEMPTS) {
+        String reason = retryBlocker(pending)
+        if (reason) {
+            rpcResult("not sent", reason)
+            return
+        }
         logDebug "RPC ${pending.method}: no readable answer, asking once more"
         unschedule("rpcPoll")
         sendRpc(pending.method as String, pending.params as Map, pending.key as String, pending.value, ((pending.attempt ?: 1) as int) + 1, pending.id as Integer)
@@ -704,11 +736,12 @@ private static String hexOf(byte[] bytes, int off, int n) {
     return sb.toString()
 }
 
-/** Raw bytes as text, every byte kept (a cut-short reply ends in garbage that must not hide its start). */
+/** Raw bytes as UTF-8 text; a cut-short reply ends in garbage, which must not hide its start. */
 private static String hexToText(String hex) {
-    StringBuilder sb = new StringBuilder()
-    for (int k = 0; k + 1 < (hex ?: "").length(); k += 2) sb.append((char) Integer.parseInt(hex.substring(k, k + 2), 16))
-    return sb.toString()
+    String h = hex ?: ""
+    byte[] b = new byte[h.length().intdiv(2)]
+    for (int k = 0; k + 1 < h.length(); k += 2) b[k.intdiv(2)] = (byte) Integer.parseInt(h.substring(k, k + 2), 16)
+    return new String(b, "UTF-8")
 }
 
 // --------------------------------------------------------------------------- Wi-Fi (cluster FC02)
@@ -738,25 +771,53 @@ void setWifi(String network, String password = null) {
     // Enable and SSID, as Zigbee2MQTT writes them. Not DHCP: 4613 answered READ_ONLY (0x88) for 0x0003 on
     // 2026-10-15, and the plug uses DHCP unless given a static address.
     List<String> frames = [wifiWrite(boolRecord(0x0004, true) + textRecord(0x0005, name))]
-    if (pass.length > 0) frames << wifiWrite(textRecord(0x0006, pass))                                                // password
-    frames << wifiWrite(attrLe(0x0002) + "20" + "01")                                                               // Action 1: apply
-    WIFI_FRAMES.put(device.deviceNetworkId as String, new ArrayList<String>(frames.subList(1, frames.size())))
-    state.wifiPending = [network: network, at: now()]
-    logInfo "sending Wi-Fi network ${network} to the plug"
-    runIn(WIFI_TIMEOUT_SECONDS, "wifiTimeout")
-    sendZigbee([frames[0]])
+    frames << wifiWrite(textRecord(0x0006, pass))                     // the password; an empty one clears what the plug holds
+    frames << wifiWrite(attrLe(0x0002) + "20" + "01")                 // Action 1: apply
+    WIFI_FRAMES.put(device.deviceNetworkId as String, new ArrayList<String>(frames))
+    // A write response names no attribute, so wait until no Wi-Fi write of ours (a refresh's Action 0, an
+    // earlier setup) can still be answered, and count only acknowledgements earned after the first frame.
+    Long busy = state.wifiBusyMs as Long
+    long waitMs = busy == null ? 0L : Math.max(0L, busy + WIFI_QUIET_MS - now())
+    int waitSeconds = waitMs == 0L ? 0 : ((int) ((waitMs + 999L) / 1000L)) + 1
+    state.wifiPending = [network: network, at: now(), sent: 0]
+    logInfo "sending Wi-Fi network ${network} to the plug${waitSeconds ? ' in ' + waitSeconds + ' s' : ''}"
+    runIn(WIFI_TIMEOUT_SECONDS + waitSeconds, "wifiTimeout")
+    if (waitSeconds) runIn(waitSeconds, "wifiStart") else wifiStart()
+}
+
+/** Sends the first frame of a staged setup. */
+void wifiStart() {
+    Map pending = state.wifiPending as Map
+    if (pending == null || ((pending.sent ?: 0) as int) > 0) return
+    if (!wifiSendNext(pending)) return                               // the hub restarted mid-way; wifiTimeout reports it
+}
+
+/** Sends the next staged frame; false when none is staged. */
+private boolean wifiSendNext(Map pending) {
+    String key = device.deviceNetworkId as String
+    List<String> rest = WIFI_FRAMES.get(key)
+    if (rest == null || rest.isEmpty()) return false
+    WIFI_FRAMES.put(key, new ArrayList<String>(rest.subList(1, rest.size())))
+    pending.sent = ((pending.sent ?: 0) as int) + 1
+    state.wifiPending = pending
+    state.wifiBusyMs = now()
+    sendZigbee([rest[0]])
+    return true
 }
 
 /** The plug acknowledged one Wi-Fi write: send the next one, or after Action 1 read back how it connects. */
 private void wifiWriteAcked() {
     Map pending = state.wifiPending as Map
     if (pending == null) return
+    if (((pending.sent ?: 0) as int) == 0) {
+        logDebug "a Wi-Fi write was acknowledged before this setup sent anything (an earlier write), ignored"
+        return
+    }
     String key = device.deviceNetworkId as String
     List<String> rest = WIFI_FRAMES.get(key)
     if (rest == null) return                                          // the hub restarted mid-way; wifiTimeout reports it
     if (!rest.isEmpty()) {
-        WIFI_FRAMES.put(key, new ArrayList<String>(rest.subList(1, rest.size())))
-        sendZigbee([rest[0]])
+        wifiSendNext(pending)
         return
     }
     wifiFinish("accepted", "wifiStatus and wifiIp show when it has joined")
@@ -784,7 +845,10 @@ void wifiRead() {
 /** Action 0 first, as Zigbee2MQTT does, so the attributes show what the plug runs; never during a setWifi. */
 private List<String> wifiReads() {
     List<String> cmds = []
-    if (state.wifiPending == null) cmds += [wifiWrite(attrLe(0x0002) + "20" + "00"), "delay 500"]
+    if (state.wifiPending == null) {
+        cmds += [wifiWrite(attrLe(0x0002) + "20" + "00"), "delay 500"]
+        state.wifiBusyMs = now()
+    }
     cmds << shellyFrame("0xFC02", "00", attrLe(0x0000) + attrLe(0x0001) + attrLe(0x0005))                  // Status, IP, SSID
     return cmds
 }
@@ -792,7 +856,9 @@ private List<String> wifiReads() {
 private void wifiFinish(String result, String detail) {
     Map pending = (state.wifiPending ?: [:]) as Map
     state.remove("wifiPending")
+    state.wifiBusyMs = now()
     unschedule("wifiTimeout")
+    unschedule("wifiStart")
     WIFI_FRAMES.remove(device.deviceNetworkId as String)
     wifiOutcome(pending.network as String, result, detail)
 }
@@ -1005,7 +1071,10 @@ private void handleMeasurement(String q, String hex, String encoding) {
     value = adjust(q, value).setScale(d.decimals as Integer, BigDecimal.ROUND_HALF_UP)
     String text = "${device.displayName} ${d.event} is ${value} ${d.unit}"
     if (device.currentValue(d.event as String)?.toString() != value.toString()) logInfo text
-    if (q == "power" && device.currentValue("switch") == "on" && value > toDecimal(state.peakWatts)) state.peakWatts = value
+    if (q == "power" && device.currentValue("switch") == "on") {
+        BigDecimal peak = toDecimal(state.peakWatts)
+        if (value > peak || value < peak * TRIP_PEAK_DECAY) state.peakWatts = value
+    }
     sendEvent(name: d.event, value: value, unit: d.unit, descriptionText: text)
 }
 
@@ -1052,7 +1121,8 @@ private void handleSoftwareBuild(String value, String encoding) {
         logWarn "firmware changed from ${previous} to ${firmware}; reading the plug's units again"
         state.remove("scale")
         state.remove("fallbackWarned")
-        sendZigbee(scaleReads())
+        ["startUpOnOff", "startUpWritable", "powerFactorSupported", "lightLevelSupported", "wifiSupported"].each { state.remove(it) }
+        sendZigbee(scaleReads() + optionalReads())                   // new firmware may offer what the old one refused
         runIn(8, "applyReporting")
     }
 }
@@ -1180,7 +1250,9 @@ private void handlePowerOnState(String hex) {
 private void handlePowerFactor(String hex, String encoding) {
     Long raw = decodeRaw(hex, encoding ?: "28", "int8")
     if (raw == null || raw < -100 || raw > 100) return
+    boolean known = state.powerFactorSupported == true
     state.powerFactorSupported = true
+    if (!known && state.reportingChange != null) runIn(3, "applyReporting")   // answered after the reporting setup ran
     BigDecimal pf = new BigDecimal(raw).divide(new BigDecimal(100), 2, BigDecimal.ROUND_HALF_UP)
     if (device.currentValue("powerFactor")?.toString() != pf.toString()) logInfo "power factor is ${pf}"
     sendEvent(name: "powerFactor", value: pf)
@@ -1190,7 +1262,9 @@ private void handleLightLevel(String attr, String hex, String encoding) {
     Long raw = decodeRaw(hex, encoding, "uint24")
     if (raw == null) return
     if (attr == "0000") {
+        boolean known = state.lightLevelSupported == true
         state.lightLevelSupported = true
+        if (!known && state.reportingChange != null) runIn(3, "applyReporting")   // answered after the reporting setup ran
         String v = LIGHT_LEVELS[raw as Integer]
         if (v == null) return
         if (device.currentValue("lightLevel") != v) logInfo "light level is ${v}"

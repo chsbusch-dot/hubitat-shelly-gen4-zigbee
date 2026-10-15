@@ -146,7 +146,8 @@ result shows in `lastSettingsWrite`. A setting that comes back refused or unconf
 next time you save the settings.
 
 The driver will not set a cutoff below what the plug is drawing at that moment, since the plug would
-switch off at once.
+switch off at once; that check runs before every attempt, and a cutoff below the plug's maximum waits until
+the plug has reported its draw.
 
 ## Reporting
 
