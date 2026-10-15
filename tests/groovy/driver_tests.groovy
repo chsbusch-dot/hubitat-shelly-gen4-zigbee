@@ -863,6 +863,27 @@ check("plug settings: the limit is clamped to 100..1800 W and never set below wh
     expect(h.lastValue("lastSettingsWrite") == "power limit 1200 W: not sent (the plug is drawing 1150.0 W and would switch itself off)", "${h.events}")
 }
 
+check("bluetooth: on enables BLE and BLE RPC through BLE.SetConfig, confirmed by the reply; the relay is not touched") {
+    def d = newDriver()
+    d.setBluetooth("on")
+    expect(rpcRequests(d) == ['{"id":1,"method":"BLE.SetConfig","params":{"config":{"enable":true,"rpc":{"enable":true}}}}'], "${rpcRequests(d)}")
+    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(d.lastValue("bluetooth") == "on" && d.lastValue("lastSettingsWrite") == "Bluetooth on: accepted", "${d.events}")
+    expect(d.zigbee.switchCommands.isEmpty() && !d.sentCommands().any { it.contains("0x0006 0x0") && it.startsWith("he cmd") }, "the relay is not touched")
+    d.advance(5_000)
+    expect(rpcRequests(d).size() == 1, "no settings follow when none are set: ${rpcRequests(d)}")
+}
+
+check("bluetooth: off sends enable false; a refusal is reported; a write in flight blocks it") {
+    def d = newDriver()
+    d.setBluetooth("off")
+    expect(rpcRequests(d) == ['{"id":1,"method":"BLE.SetConfig","params":{"config":{"enable":false}}}'], "${rpcRequests(d)}")
+    d.setBluetooth("on")
+    expect(rpcRequests(d).size() == 1 && d.lastValue("lastSettingsWrite") == "Bluetooth on: not sent (another write is in progress; try again in a minute)", "${d.events}")
+    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","error":{"code":-103,"mes')
+    expect(d.lastValue("lastSettingsWrite") == "Bluetooth off: refused (error -103)" && d.lastValue("bluetooth") == null, "${d.events}")
+}
+
 check("plug settings: the RPC id wraps from 99 to 1; Configure forgets what the plug accepted") {
     def d = newDriver(powerLimitWatts: 1500)
     d.state.rpcId = 99

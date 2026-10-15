@@ -31,13 +31,14 @@
  * 1.0.1  2026-10-15  Health check pings before it marks a plug offline (WOR-777)
  * 1.1.0  2026-10-15  Identify, light level, trip detection, power-on state and power limit settings,
  *                    power factor where offered (WOR-759)
+ * 1.2.0  2026-10-15  setBluetooth command, for the Shelly app (Wi-Fi setup, firmware updates)
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.1.0" }
+static String driverVersion() { "1.2.0" }
 
 metadata {
     definition(
@@ -62,11 +63,14 @@ metadata {
         attribute "powerOnState", "enum", ["off", "on", "toggle", "previous"]
         attribute "lightLevel",   "enum", ["dark", "twilight", "bright"]
         attribute "lastSettingsWrite", "string"
+        attribute "bluetooth",    "enum", ["on", "off"]
         attribute "powerFactor",  "number"
         attribute "tripCount",    "number"
         attribute "lastTrip",     "string"
 
         command "identify", [[name: "seconds", type: "NUMBER", description: "How long the LED blinks (1 to 600, default 10)"]]
+        command "setBluetooth", [[name: "state", type: "ENUM", constraints: ["on", "off"],
+                                  description: "Bluetooth on the plug; the Shelly app needs it for Wi-Fi setup and firmware updates"]]
 
         // As the hub recorded them: joined on firmware 02000021 (no out clusters listed), and the
         // simple descriptor of firmware 2.0.1 (1490-1852-020001FF), which adds Shelly's cluster FC21.
@@ -340,6 +344,22 @@ void applyPlugSettings() {
     sendRpc("Switch.SetConfig", [id: 0, config: [(key): value]], key, todo[key])
 }
 
+/**
+ * Turns the plug's Bluetooth on or off through Shelly's RPC (BLE.SetConfig); "on" also enables RPC over
+ * Bluetooth, which the Shelly app uses to reach a plug in Zigbee mode (Wi-Fi setup, firmware updates).
+ * The relay is not touched.
+ */
+void setBluetooth(String onOff) {
+    String v = onOff?.toString()?.toLowerCase() == "off" ? "off" : "on"
+    if (state.rpcPending != null || state.startUpPending != null) {
+        settingsOutcome("bluetooth", v, "not sent", "another write is in progress; try again in a minute", false)
+        return
+    }
+    logInfo "turning Bluetooth ${v}"
+    Map config = v == "on" ? [enable: true, rpc: [enable: true]] : [enable: false]
+    sendRpc("BLE.SetConfig", [config: config], "bluetooth", v)
+}
+
 /** Preferences that differ from what the plug accepted, minus those already refused this round. */
 private Map pendingPlugSettings() {
     Map wanted = [:]
@@ -371,10 +391,11 @@ private void startUpRefused(String detail) {
 
 /** Records one setting's outcome and moves on to the next pending setting, if any. */
 private void settingsOutcome(String key, value, String result, String detail, boolean skipOnFail = true) {
-    String what = key == "initial_state" ? "power-on state ${value}" : "power limit ${value} W"
+    String what = key == "initial_state" ? "power-on state ${value}" : (key == "bluetooth" ? "Bluetooth ${value}" : "power limit ${value} W")
     String text = "${what}: ${result}${detail ? ' (' + detail + ')' : ''}"
     if (result == "accepted") {
         state.plugSettings = ((state.plugSettings ?: [:]) as Map) + [(key): value]
+        if (key == "bluetooth") sendEvent(name: "bluetooth", value: value)
         logInfo text
     } else {
         logWarn text

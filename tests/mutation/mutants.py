@@ -78,6 +78,8 @@ MUTANTS = {
             "    state.startUpOnOff = false\n    settingsOutcome(", "    settingsOutcome("),
     "M26": ("Configure keeps what it knew about the plug's settings",
             '    ["plugSettings", "settingsSkip", "startUpOnOff", "powerFactorSupported", "lightLevelSupported"].each { state.remove(it) }\n', ""),
+    "M27": ("setBluetooth on sends enable false",
+            '    Map config = v == "on" ? [enable: true, rpc: [enable: true]] : [enable: false]', '    Map config = [enable: false]'),
     "M12": ("the hub's firmwareMT is left out of the firmware identity",
             '[build, device.getDataValue("firmwareMT")].findAll', "[build].findAll"),
 }
