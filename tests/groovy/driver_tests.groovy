@@ -39,13 +39,28 @@ compilerConfig.scriptBaseClass = HubitatDriverStub.name
 def shell = new GroovyShell(HubitatDriverStub.classLoader, new Binding(), compilerConfig)
 def driverClass = shell.parse(driverFile).getClass()
 
-/** A fresh driver per test, preferences at their declared defaults unless `prefs` says otherwise. */
+/** A write response on FC01, status SUCCESS: both plugs sent one for every TxCtl and TxData write on 2026-10-15. */
+def rpcWriteAck = [raw: "catchall", profileId: "C001", clusterId: "FC01", clusterInt: 0xFC01, sourceEndpoint: "EF", destinationEndpoint: "01",
+                   options: "0040", messageType: "00", dni: "7257", isClusterSpecific: false, isManufacturerSpecific: true, manufacturerId: "1490",
+                   command: "04", direction: "01", data: ["00"]]
+
+/**
+ * A fresh driver per test, preferences at their declared defaults unless `prefs` says otherwise. Its plug
+ * acknowledges each FC01 write at once; a test that needs them late or missing sets onHubCommand to null.
+ */
 def newDriver = { Map prefs = [:] ->
     def d = driverClass.getDeclaredConstructor().newInstance()
     d.run()
     d.metadataRecord.inputs.each { if (it.defaultValue != null) d.settings[it.name as String] = it.defaultValue }
     d.settings.putAll(prefs)
     d.device.onRemoveSetting = { String n -> d.settings.remove(n) }
+    d.onHubCommand = { List<String> cmds ->
+        cmds.findAll { (it =~ /0xFC01 \{049014[0-9A-F]{2}02/).find() }.each {
+            String key = "ack-${d.zigbee.descriptions.size()}"
+            d.zigbee.descriptions[key] = rpcWriteAck
+            d.parse(key)
+        }
+    }
     return d
 }
 
@@ -900,6 +915,57 @@ check("plug settings: a silent first try is asked once more, and the second answ
     expect(d.state.rpcPending != null, "a late answer to the first try is not ours any more")
     chunk(d, '{"id":2,"src":"shellyplugusg4-aabbcc000001","r')
     expect(d.lastValue("lastSettingsWrite") == "Bluetooth on: accepted" && d.lastValue("bluetooth") == "on", "${d.events}")
+}
+
+check("plug settings: each TxData chunk waits for the plug to acknowledge the write before it") {
+    // 2026-10-15 10:25: chunks sent 150 ms apart reached 4612 scrambled; it answered error -103 for "config".
+    def d = newDriver()
+    d.onHubCommand = null
+    d.setBluetooth("on")
+    String json = '{"id":1,"method":"BLE.SetConfig","params":{"config":{"enable":true,"rpc":{"enable":true}}}}'
+    Closure fc01 = { d.sentCommands().findAll { it.contains("0xFC01") } }
+    expect(fc01().size() == 1 && fc01()[0].contains("02010023" + String.format("%02X", json.length()) + "000000"), "TxCtl alone: ${fc01()}")
+    d.advance(5_000)
+    expect(fc01().size() == 1, "nothing more without an acknowledgement, no polling yet: ${fc01()}")
+    [1, 2, 3].each { int n ->
+        deliver(d, rpcWriteAck)
+        expect(fc01().size() == n + 1 && fc01()[n].contains("02000042"), "chunk ${n} after acknowledgement ${n}: ${fc01()}")
+    }
+    expect(rpcRequests(d) == [json], "${rpcRequests(d)}")
+    d.advance(5_000)
+    expect(fc01().size() == 3 + 1, "no poll before the last chunk is acknowledged: ${fc01()}")
+    deliver(d, rpcWriteAck)
+    d.advance(2_000)
+    expect(fc01().size() == 4 + 2 && fc01()[4].endsWith("000200} {0xC001}"), "then it reads RxCtl: ${fc01()}")
+    Long due = d.dueAt.rpcTimeout
+    deliver(d, rpcWriteAck)
+    expect(fc01().size() == 6 && d.dueAt.rpcTimeout == due, "a duplicate acknowledgement sends nothing, moves nothing: ${fc01()} ${d.dueAt}")
+}
+
+check("plug settings: a stalled request (an acknowledgement lost) is asked again after 25 s") {
+    def d = newDriver()
+    d.onHubCommand = null
+    d.setBluetooth("on")
+    deliver(d, rpcWriteAck)
+    d.advance(25_000)
+    expect(rpcRequests(d).size() == 2 && rpcRequests(d)[1] == "", "a fresh TxCtl for id 2: ${d.sentCommands()}")
+    expect(d.state.rpcPending.id == 2 && d.state.rpcPending.sent == 0, "${d.state.rpcPending}")
+}
+
+check("recorded: 4612's error -103, its opening cut short at \"e, is refused, not left unjudged") {
+    // 2026-10-15 10:25 from plug 4612 (fw 2.0.1): RxCtl 112; RxData the opening cut to 50 bytes ending in ","e,
+    // then ":{"code":-103,"message":"Missing or bad argum. The plug's own id in src is replaced by a made-up one.
+    def d = newDriver()
+    d.setBluetooth("on")
+    d.advance(25_000)                                                       // the first try went unanswered
+    deliver(d, rpcReply('{"id":2,"src":"shellyplugusg4-aabbcc000001","e', 50))
+    expect(d.lastValue("lastSettingsWrite") == "Bluetooth on: refused (error, its code cut off)", "the opening alone is enough: ${d.events}")
+    def e = newDriver()
+    e.setBluetooth("on")
+    e.advance(25_000)
+    deliver(e, rpcReply('":{"code":-103,"message":"Missing or bad argum', 50))
+    deliver(e, rpcReply('{"id":2,"src":"shellyplugusg4-aabbcc000001","e', 50))
+    expect(e.lastValue("lastSettingsWrite") == "Bluetooth on: refused (error -103)", "with the code ahead of it: ${e.events}")
 }
 
 check("plug settings: the RPC id wraps from 99 to 1; Configure forgets what the plug accepted") {
