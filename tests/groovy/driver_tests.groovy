@@ -902,6 +902,7 @@ check("bluetooth: off sends enable false; a refusal is reported; a write in flig
     d.setBluetooth("on")
     d.advance(50_000)
     expect(d.lastValue("lastSettingsWrite") == "Bluetooth on: unconfirmed (no readable answer in 2 tries; run setBluetooth again)", "${d.lastValue('lastSettingsWrite')}")
+    expect(d.state.settingsSkip == ["bluetooth"], "a key is skipped once, however often it fails: ${d.state.settingsSkip}")
 }
 
 check("plug settings: a silent first try is asked once more, and the second answer counts") {

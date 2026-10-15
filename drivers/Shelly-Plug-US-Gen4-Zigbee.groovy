@@ -402,7 +402,8 @@ private void settingsOutcome(String key, value, String result, String detail, bo
         logInfo text
     } else {
         logWarn text
-        if (skipOnFail) state.settingsSkip = ((state.settingsSkip ?: []) as List) + [key]
+        List skip = (state.settingsSkip ?: []) as List
+        if (skipOnFail && !skip.contains(key)) state.settingsSkip = skip + [key]
     }
     sendEvent(name: "lastSettingsWrite", value: text)
     runIn(2, "applyPlugSettings")

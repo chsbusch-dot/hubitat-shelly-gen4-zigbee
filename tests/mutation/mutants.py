@@ -89,6 +89,8 @@ MUTANTS = {
             '    sendZigbee([rpcFrame("02", "0100" + "23" + le32(bytes.length))] + chunks.collect { rpcFrame("02", it) })'),
     "M31": ("a duplicate write acknowledgement sends something again",
             "    if (sent > chunks.size()) return", "    if (false) return"),
+    "M32": ("a failing setting is added to the skip list again on every failure",
+            "        if (skipOnFail && !skip.contains(key)) state.settingsSkip = skip + [key]", "        if (skipOnFail) state.settingsSkip = skip + [key]"),
     "M12": ("the hub's firmwareMT is left out of the firmware identity",
             '[build, device.getDataValue("firmwareMT")].findAll', "[build].findAll"),
 }
