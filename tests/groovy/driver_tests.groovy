@@ -629,8 +629,12 @@ check("firmware: a new software build or OTA version clears the units and reads 
     expect(d.dueAt.applyReporting == d.clockMs + 8000, "reporting redone: ${d.dueAt}")
     expect(d.logsMatching("firmware changed from 2.0.1 1490-1852-020000FF to 2.0.1 1490-1852-020001FF").size() == 1, "${d.logLines}")
     giveUnits(d, UNITS_020000FF)
-    deliver(d, frame("0000", "4000", "42", "2.0.2", null, "01"))
-    expect(d.state.scale == null && d.logsMatching("firmware changed").size() == 2, "a new build alone counts too: ${d.logLines}")
+    d.advance(30_000)
+    deliver(d, frame("0000", "4000", "42", "2.0.2", null, "01"))           // 30 s after the last change
+    expect(d.state.scale != null && d.logsMatching("firmware changed").size() == 1, "seconds after a change the label moves on without a second re-read: ${d.logLines}")
+    d.advance(400_000)
+    deliver(d, frame("0000", "4000", "42", "2.0.3", null, "01"))
+    expect(d.state.scale == null && d.logsMatching("firmware changed").size() == 2, "a new build alone counts too, once things settled: ${d.logLines}")
 }
 
 check("firmware: a build handed over as hex of its characters is decoded") {
@@ -886,6 +890,7 @@ check("bluetooth: on enables BLE and BLE RPC through BLE.SetConfig, confirmed by
     def d = newDriver()
     d.setBluetooth("on")
     expect(rpcRequests(d) == ['{"id":1,"method":"BLE.SetConfig","params":{"config":{"enable":true,"rpc":{"enable":true}}}}'], "${rpcRequests(d)}")
+    d.advance(2_000)                                                        // the first poll
     chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
     expect(d.lastValue("bluetooth") == "on" && d.lastValue("lastSettingsWrite") == "Bluetooth on: accepted", "${d.events}")
     expect(d.zigbee.switchCommands.isEmpty() && !d.sentCommands().any { it.contains("0x0006 0x0") && it.startsWith("he cmd") }, "the relay is not touched")
@@ -899,6 +904,7 @@ check("bluetooth: off sends enable false; a refusal is reported; a write in flig
     expect(rpcRequests(d) == ['{"id":1,"method":"BLE.SetConfig","params":{"config":{"enable":false}}}'], "${rpcRequests(d)}")
     d.setBluetooth("on")
     expect(rpcRequests(d).size() == 1 && d.lastValue("lastSettingsWrite") == "Bluetooth on: not sent (another write is in progress; try again in a minute)", "${d.events}")
+    d.advance(2_000)
     chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","error":{"code":-103,"mes')
     expect(d.lastValue("lastSettingsWrite") == "Bluetooth off: refused (error -103)" && d.lastValue("bluetooth") == null, "${d.events}")
     d.setBluetooth("on")
@@ -907,16 +913,17 @@ check("bluetooth: off sends enable false; a refusal is reported; a write in flig
     expect(d.state.settingsSkip == ["bluetooth"], "a key is skipped once, however often it fails: ${d.state.settingsSkip}")
 }
 
-check("plug settings: a silent first try is asked once more, and the second answer counts") {
+check("plug settings: a silent first try is asked once more under the same id, so either answer counts") {
     // 2026-10-15: Bluetooth on to 4613 got no readable answer, the same request a minute later was accepted in 3 s.
     def d = newDriver()
     d.setBluetooth("on")
     d.advance(25_000)
     List<String> req = rpcRequests(d)
-    expect(req.size() == 2 && req[1] == '{"id":2,"method":"BLE.SetConfig","params":{"config":{"enable":true,"rpc":{"enable":true}}}}', "same request, new id: ${req}")
-    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
-    expect(d.state.rpcPending != null, "a late answer to the first try is not ours any more")
+    expect(req.size() == 2 && req[1] == req[0] && req[0].startsWith('{"id":1,'), "the same request, the same id: ${req}")
+    d.advance(2_000)
     chunk(d, '{"id":2,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(d.state.rpcPending != null, "an answer to another id is not ours")
+    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
     expect(d.lastValue("lastSettingsWrite") == "Bluetooth on: accepted" && d.lastValue("bluetooth") == "on", "${d.events}")
 }
 
@@ -951,8 +958,8 @@ check("plug settings: a stalled request (an acknowledgement lost) is asked again
     d.setBluetooth("on")
     deliver(d, rpcWriteAck)
     d.advance(25_000)
-    expect(rpcRequests(d).size() == 2 && rpcRequests(d)[1] == "", "a fresh TxCtl for id 2: ${d.sentCommands()}")
-    expect(d.state.rpcPending.id == 2 && d.state.rpcPending.sent == 0, "${d.state.rpcPending}")
+    expect(rpcRequests(d).size() == 2 && rpcRequests(d)[1] == "", "a fresh TxCtl, same id: ${d.sentCommands()}")
+    expect(d.state.rpcPending.id == 1 && d.state.rpcPending.attempt == 2 && d.state.rpcPending.sent == 0, "${d.state.rpcPending}")
 }
 
 check("recorded: 4612's error -103, its opening cut short at \"e, is refused, not left unjudged") {
@@ -960,14 +967,14 @@ check("recorded: 4612's error -103, its opening cut short at \"e, is refused, no
     // then ":{"code":-103,"message":"Missing or bad argum. The plug's own id in src is replaced by a made-up one.
     def d = newDriver()
     d.setBluetooth("on")
-    d.advance(25_000)                                                       // the first try went unanswered
-    deliver(d, rpcReply('{"id":2,"src":"shellyplugusg4-aabbcc000001","e', 50))
+    d.advance(25_000 + 2_000)                                               // the first try went unanswered; the retry polled
+    deliver(d, rpcReply('{"id":1,"src":"shellyplugusg4-aabbcc000001","e', 50))
     expect(d.lastValue("lastSettingsWrite") == "Bluetooth on: refused (error, its code cut off)", "the opening alone is enough: ${d.events}")
     def e = newDriver()
     e.setBluetooth("on")
-    e.advance(25_000)
+    e.advance(25_000 + 2_000)
     deliver(e, rpcReply('":{"code":-103,"message":"Missing or bad argum', 50))
-    deliver(e, rpcReply('{"id":2,"src":"shellyplugusg4-aabbcc000001","e', 50))
+    deliver(e, rpcReply('{"id":1,"src":"shellyplugusg4-aabbcc000001","e', 50))
     expect(e.lastValue("lastSettingsWrite") == "Bluetooth on: refused (error -103)", "with the code ahead of it: ${e.events}")
 }
 
@@ -1137,10 +1144,116 @@ check("recorded: 4612's 81-byte success to request id 14, its opening cut on the
     expect(e.lastValue("lastSettingsWrite") == "power limit 1800 W: refused (error -103)", "${e.events}")
 }
 
+check("trip: three button presses (on, off 0.8 s later, on) at 0 W are not a trip; a physical on under load still is") {
+    // 2026-10-15 11:04 from plug 4612: on [physical], off [physical] 0.85 s later, on [physical] 0.56 s later, nothing plugged in.
+    def d = newDriver()
+    giveUnits(d, UNITS_020000FF)
+    deliver(d, frame("0006", "0000", "10", "01"))
+    d.advance(850)
+    deliver(d, frame("0006", "0000", "10", "00"))
+    expect(d.lastValue("tripCount") == null && d.logsMatching("switched itself off").isEmpty(), "a person at the button: ${d.events}")
+    d.advance(560)
+    deliver(d, frame("0006", "0000", "10", "01"))
+    deliver(d, frame("0B04", "050B", "29", hex(1500, 4)))
+    d.advance(3_000)
+    deliver(d, frame("0006", "0000", "10", "00"))
+    expect(d.lastValue("tripCount") == 1, "a physical on that drew 1500 W and dropped out 3 s later is a trip: ${d.events}")
+}
+
+check("plug settings: a pending write older than its timeouts is forgotten; a fresh one still blocks") {
+    def d = newDriver()
+    d.state.rpcPending = [id: 3, key: "power_limit", value: 1500, polls: 0, at: d.clockMs - 80_000]   // its timeout job is gone
+    d.setBluetooth("on")
+    expect(rpcRequests(d) == ['{"id":1,"method":"BLE.SetConfig","params":{"config":{"enable":true,"rpc":{"enable":true}}}}'], "sent after forgetting the stale write: ${rpcRequests(d)}")
+    expect(d.logsMatching("WARN Test Plug: forgetting a settings write that never finished").size() == 1, "${d.logLines}")
+    def e = newDriver()
+    e.state.rpcPending = [id: 3, key: "power_limit", value: 1500, polls: 0, at: e.clockMs - 10_000]
+    e.setBluetooth("on")
+    expect(rpcRequests(e).isEmpty() && e.lastValue("lastSettingsWrite") == "Bluetooth on: not sent (another write is in progress; try again in a minute)", "${e.events}")
+    def w = newDriver()
+    w.state.wifiPending = [network: "Old", at: w.clockMs - 90_000]
+    w.setWifi("Home Net", "correct horse 42")
+    expect(w.state.wifiPending?.network == "Home Net" && w.logsMatching("forgetting a Wi-Fi write that never finished").size() == 1, "${w.state} ${w.logLines}")
+}
+
+check("plug settings: a chunk before the first poll is ignored; a retry keeps its request id so a late answer counts") {
+    def d = newDriver(powerLimitWatts: 1500)
+    d.updated(); d.advance(30_000)                                           // sent and acknowledged, not yet polled
+    chunk(d, 'lt":{"restart_required":false}}')
+    expect(d.state.rpcPending != null && d.state.rpcPending.tail == null && d.lastValue("lastSettingsWrite") == null, "a repeated tail of an earlier answer is dropped: ${d.state.rpcPending}")
+    d.advance(2_000)                                                         // the first poll
+    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(d.lastValue("lastSettingsWrite") == "power limit 1500 W: accepted", "${d.events}")
+    def e = newDriver()
+    e.setBluetooth("on")
+    e.advance(25_000)                                                        // no answer: asked once more
+    List<String> req = rpcRequests(e)
+    expect(req.size() == 2 && req[1] == req[0], "the same request, the same id: ${req}")
+    e.advance(2_000)
+    chunk(e, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(e.lastValue("lastSettingsWrite") == "Bluetooth on: accepted" && e.lastValue("bluetooth") == "on", "${e.events}")
+}
+
+check("configure: forgets the Bluetooth attribute, which only mirrors what the driver last sent") {
+    def d = newDriver()
+    d.setBluetooth("on"); d.advance(2_000)
+    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(d.lastValue("bluetooth") == "on", "${d.events}")
+    d.configure()
+    expect(d.device.deletedStates.contains("bluetooth"), "${d.device.deletedStates}")
+}
+
+check("decoding: a float, a long string or a bitmap does not hide the attributes after it; an unknown type is logged") {
+    def d = newDriver(logEnable: true)
+    giveUnits(d, UNITS_020000FF)
+    deliver(d, catchall("0B04", "01", ["00", "0F", "00", "39", "00", "00", "80", "3F", "05", "05", "00", "21", "B8", "2E"]))   // a float, then voltage 11960
+    expect(d.lastValue("voltage").toString() == "119.6", "the voltage after a float is read: ${d.events}")
+    deliver(d, catchall("0B04", "01", ["01", "0F", "00", "44", "02", "00", "41", "42", "05", "05", "00", "21", "4C", "2F"]))   // a long string "AB", then 12108
+    expect(d.lastValue("voltage").toString() == "121.1", "the voltage after a long string is read: ${d.events}")
+    deliver(d, catchall("0B04", "01", ["03", "0F", "00", "1B", "01", "02", "03", "04", "05", "05", "00", "21", "4C", "2F"]))   // a 32-bit bitmap
+    expect(d.eventsNamed("voltage").size() == 3, "the voltage after a bitmap32 is read: ${d.events}")
+    deliver(d, catchall("0B04", "01", ["02", "0F", "00", "E2", "01", "02", "03", "04"]))
+    expect(d.logsMatching("0B04/0F02 has type 0xE2, which this driver does not decode").size() == 1, "${d.logLines}")
+}
+
+check("led: the LED preferences go out as one PLUGS_UI.SetConfig after the other settings, and not again once accepted") {
+    def d = newDriver(powerLimitWatts: 1500, ledMode: "switch", ledOnColor: "green", ledOffColor: "red", ledBrightness: 50,
+                      ledNightMode: "on", ledNightFrom: "22:00", ledNightTo: "06:00", ledNightBrightness: 10)
+    d.updated(); d.advance(32_000)
+    expect(rpcRequests(d) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"power_limit":1500}}}'], "the power limit first: ${rpcRequests(d)}")
+    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+    d.advance(2_000)
+    String led = groovy.json.JsonOutput.toJson([id: 2, method: "PLUGS_UI.SetConfig", params: [config: [leds: [mode: "switch",
+        colors: ["switch:0": [on: [rgb: [0, 100, 0], brightness: 50], off: [rgb: [100, 0, 0], brightness: 50]], power: [brightness: 50]],
+        night_mode: [enable: true, brightness: 10, active_between: ["22:00", "06:00"]]]]]])
+    expect(rpcRequests(d)[1] == led, "then the LED settings: ${rpcRequests(d)[1]}")
+    d.advance(2_000)
+    chunk(d, '{"id":2,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(d.lastValue("lastSettingsWrite") == "LED settings: accepted" && d.state.plugSettings.led.mode == "switch", "${d.events} ${d.state.plugSettings}")
+    d.updated(); d.advance(60_000)
+    expect(rpcRequests(d).size() == 2, "nothing is sent again: ${rpcRequests(d)}")
+    d.settings.ledOffColor = "blue"
+    d.updated(); d.advance(32_000)
+    expect(rpcRequests(d).size() == 3 && rpcRequests(d)[2].contains('"off":{"rgb":[0,0,100],"brightness":50}'), "a changed colour goes out: ${rpcRequests(d)[2]}")
+    expect(d.zigbee.switchCommands.isEmpty(), "the relay is not touched")
+}
+
+check("led: every LED preference at keep sends nothing; a bad night time falls back; night mode off sends enable false") {
+    def d = newDriver()
+    d.updated(); d.advance(40_000)
+    expect(!d.sentCommands().any { it.contains("0xFC01") }, "${d.hubCommands}")
+    def e = newDriver(ledNightMode: "on", ledNightFrom: "25:99", ledNightTo: "7:00", ledNightBrightness: 0)
+    e.updated(); e.advance(32_000)
+    expect(rpcRequests(e) == ['{"id":1,"method":"PLUGS_UI.SetConfig","params":{"config":{"leds":{"night_mode":{"enable":true,"brightness":0,"active_between":["22:00","06:00"]}}}}}'], "${rpcRequests(e)}")
+    def f = newDriver(ledNightMode: "off", ledMode: "off")
+    f.updated(); f.advance(32_000)
+    expect(rpcRequests(f) == ['{"id":1,"method":"PLUGS_UI.SetConfig","params":{"config":{"leds":{"mode":"off","night_mode":{"enable":false}}}}}'], "${rpcRequests(f)}")
+}
+
 check("plug settings: the RPC id wraps from 99 to 1; Configure forgets what the plug accepted") {
     def d = newDriver(powerLimitWatts: 1500)
     d.state.rpcId = 99
-    d.updated(); d.advance(30_000)
+    d.updated(); d.advance(32_000)
     expect(rpcRequests(d) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"power_limit":1500}}}'], "${rpcRequests(d)}")
     chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
     expect(d.state.plugSettings == [power_limit: 1500], "${d.state}")
