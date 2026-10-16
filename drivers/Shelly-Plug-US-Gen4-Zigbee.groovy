@@ -61,13 +61,18 @@
  *                    trips keep a few readings, so two 0 W reports still show the load; Configure keeps the confirmed
  *                    cutoff; Bluetooth off also clears rpc.enable; a default response refusing the power-on write falls
  *                    back to RPC; each Wi-Fi frame gets its own 30 s (WOR-793)
+ * 1.4.5  2026-10-15  Fifth review: request ids stay 1 to 9, so the cut-short opening always shows the outcome on this
+ *                    plug; a tail-only success needs the exact length for its own restart_required value; the trip load
+ *                    counts only readings since the last switch-on and falls back to the last reading after an upgrade;
+ *                    Configure and Save carry a cutoff confirmed under 1.4.3 into cutoffWatts; a Wi-Fi setup that is
+ *                    still being acknowledged is not forgotten after 60 s (WOR-798)
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.4.4" }
+static String driverVersion() { "1.4.5" }
 
 metadata {
     definition(
@@ -241,6 +246,7 @@ void installed() {
 void updated() {
     log.info "${device.displayName}: preferences saved (driver ${driverVersion()})"
     migrateFromOtherDrivers()
+    keepConfirmedCutoff()
     scheduleHousekeeping()
     runIn(2, "applyReporting")
     state.remove("prevWatts")                                               // 1.4.3 kept one earlier reading; watts keeps a few
@@ -254,6 +260,7 @@ List<String> configure() {
     log.info "${device.displayName}: configuring (driver ${driverVersion()}); the relay is not switched"
     migrateFromOtherDrivers()
     state.remove("fallbackWarned")
+    keepConfirmedCutoff()                             // before the settings are forgotten
     ["plugSettings", "settingsSkip", "startUpOnOff", "startUpWritable", "powerFactorSupported", "lightLevelSupported", "wifiSupported"].each { state.remove(it) }
     try {
         device.deleteCurrentState("bluetooth")        // what the driver last sent, not what a reset plug has
@@ -588,7 +595,9 @@ private void settingsOutcome(String key, value, String result, String detail, bo
  * Only TxCtl goes out here; rpcWriteAcked sends each chunk once the plug has acknowledged the write before.
  */
 private void sendRpc(String method, Map params, String key, value, int attempt = 1, Integer sameId = null) {
-    int id = sameId != null ? sameId : (((state.rpcId ?: 0) as int) % 99) + 1
+    // Ids 1 to 9: with a one-digit id the 46 bytes Hubitat hands over of the reply's opening still reach the key after
+    // src on this plug (src is 27 characters), so the opening alone tells result from error (judgeRpcReply).
+    int id = sameId != null ? sameId : (((state.rpcId ?: 0) as int) % 9) + 1
     state.rpcId = id
     byte[] bytes = JsonOutput.toJson([id: id, method: method, params: params]).getBytes("UTF-8")
     List<String> chunks = []
@@ -781,8 +790,8 @@ private void judgeRpcReply() {
         refused = (head + tail).contains('"error"')
         accepted = (head + tail).contains('"result"')
     } else if (!refused && !accepted && pending.replyLength != null) {
-        if (tail.contains('restart_required') && successLengthMatches(head, pending)) accepted = true
-        else if (tail.contains('"code":') && !successLengthMatches(head, pending)) refused = true
+        if (tail.contains('restart_required') && successLengthMatches(head, tail, pending)) accepted = true
+        else if (tail.contains('"code":') && !successLengthMatches(head, tail, pending)) refused = true
     }
     if (refused) {
         def code = (head + tail) =~ /"code":(-?\d+)/
@@ -796,16 +805,19 @@ private void judgeRpcReply() {
 
 /**
  * Whether the reply length the plug reported is exactly what a SetConfig success for this request id and this
- * plug measures (restart_required false or true). An error reply is longer, and a stale tail of an earlier reply
- * must not confirm the request after it (2026-10-15 review).
+ * plug measures, with the restart_required value the tail shows. An error reply is longer, and a stale tail of
+ * an earlier reply must not confirm the request after it (2026-10-15 reviews: with a tolerance of one byte, the
+ * previous request's success passed for this one's). A tail carries nothing else that ties it to a request, so
+ * this is the last resort for an opening cut before the key; this plug's ids and src keep it from ever being needed.
  */
-private static boolean successLengthMatches(String head, Map pending) {
+private static boolean successLengthMatches(String head, String tail, Map pending) {
     Long len = pending.replyLength as Long
     def id = head =~ /^\{"id":(\d+)/
     def src = head =~ /"src":"([^"]*)"/
     if (len == null || !id.find() || !src.find()) return false
-    int success = '{"id":'.length() + id.group(1).length() + ',"src":"'.length() + src.group(1).length() + '","result":{"restart_required":false}}'.length()
-    return len == success || len == success - 1
+    String value = tail.contains('"restart_required":true') ? "true" : "false"
+    int expected = '{"id":'.length() + id.group(1).length() + ',"src":"'.length() + src.group(1).length() + '","result":{"restart_required":'.length() + value.length() + '}}'.length()
+    return len == expected
 }
 
 private static String le32(int n) {
@@ -881,6 +893,7 @@ private boolean wifiSendNext(Map pending) {
     if (rest == null || rest.isEmpty()) return false
     WIFI_FRAMES.put(key, new ArrayList<String>(rest.subList(1, rest.size())))
     pending.sent = ((pending.sent ?: 0) as int) + 1
+    pending.at = now()                                                    // progress: dropStalePending counts from the latest frame
     state.wifiPending = pending
     state.wifiBusyMs = now()
     sendZigbee([rest[0]])
@@ -1153,18 +1166,22 @@ private void checkTrip() {
 }
 
 /**
- * The load the plug carried into the off, from its recent power readings (state.watts, newest first). A
- * protection trip reports the cut, 0 W once or more, moments before the off: within the grace time a reading
- * that drops to under half the load before it is that cut, so the load before it stands. An older reading
- * stands as it is: a heater that fell to 50 W minutes ago is judged at 50 W, whatever it drew before.
+ * The load the plug carried into the off, from its power readings since it was switched on (state.watts, newest
+ * first; an earlier cycle's load is not this one's). A protection trip reports the cut, 0 W once or more, moments
+ * before the off: within the grace time a reading that drops to under half the load before it is that cut, so the
+ * load before it stands. An older reading stands as it is: a heater that fell to 50 W minutes ago is judged at
+ * 50 W, whatever it drew before.
  */
 private BigDecimal tripLoad() {
     List readings = (state.watts ?: []) as List
+    if (!readings && state.lastWatts != null) readings = [[state.lastWatts, state.lastWattsMs ?: 0L]]   // 1.4.3 kept one reading
+    Long onAt = state.onAtMs as Long
     long graceFrom = now() - TRIP_DROP_GRACE_MS
     BigDecimal load = null
     for (int k = readings.size() - 1; k >= 0; k--) {                           // oldest first
         List r = readings[k] as List
         BigDecimal w = toDecimal(r[0])
+        if (onAt != null && (r[1] as Long) < onAt) continue
         if (load == null || (r[1] as Long) < graceFrom || w >= load * TRIP_PEAK_DECAY) load = w
     }
     return load ?: 0
@@ -1315,6 +1332,12 @@ private void scheduleHousekeeping() {
     runEvery15Minutes("healthCheck")
     sendEvent(name: "checkInterval", value: healthTimeoutSeconds(), unit: "s")
     if (logEnable) runIn(1800, "logsOff")
+}
+
+/** Up to 1.4.3 the confirmed cutoff lived only under plugSettings, which Configure clears: carry it over once. */
+private void keepConfirmedCutoff() {
+    def limit = ((state.plugSettings ?: [:]) as Map).power_limit
+    if (limit != null && state.cutoffWatts == null) state.cutoffWatts = limit
 }
 
 /** Removes what the 1PM Gen 4 driver left behind; its calibration percentages would now be wrong. */
