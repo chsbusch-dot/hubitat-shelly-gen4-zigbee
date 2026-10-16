@@ -1152,23 +1152,21 @@ check("wifi: Configure and Refresh leave Action 0 and the reads to the driver, w
     expect(f.state.wifiSupported == null && f.dueAt.wifiRead != null, "Configure asks again: ${f.dueAt}")
 }
 
-check("recorded: 4612's 81-byte success to request id 14, its opening cut on the quote before result, is accepted") {
+check("recorded: 4612's 81-byte success to request id 14, its opening cut on the quote before result, is accepted (ids now stay below 10: a src one character longer stands in for the digit)") {
     // 2026-10-15 14:02 from plug 4612 (fw 2.0.1): RxCtl 81; RxData 46 of the first 50 bytes, ending in ,"; then the
     // 31-byte tail lt":{"restart_required":false}}. One more digit in the id than on 2026-10-15 09:36 moves the cut
     // one character earlier, from the r of result onto the quote. The plug's own id in src is replaced by a made-up one.
     def d = newDriver(powerLimitWatts: 1800)
-    d.state.rpcId = 13
     d.updated(); d.advance(32_000)
-    expect(rpcRequests(d)[0].startsWith('{"id":14,'), "${rpcRequests(d)}")
+    expect(rpcRequests(d)[0].startsWith('{"id":1,'), "${rpcRequests(d)}")
     rpcLength(d, 81)                                                        // as the plug reported it before the chunks
-    deliver(d, rpcReply('{"id":14,"src":"shellyplugusg4-aabbcc000001","', 50))
+    deliver(d, rpcReply('{"id":1,"src":"shellyplugusg4-aabbcc0000011","', 50))
     expect(d.state.rpcPending != null && d.lastValue("lastSettingsWrite") == null, "the opening alone names no outcome: ${d.events}")
     deliver(d, rpcReply('lt":{"restart_required":false}}', 31))
     expect(d.lastValue("lastSettingsWrite") == "power limit 1800 W: accepted", "${d.events}")
     def e = newDriver(powerLimitWatts: 1800)                                // an error cut the same way
-    e.state.rpcId = 13
     e.updated(); e.advance(32_000)
-    deliver(e, rpcReply('{"id":14,"src":"shellyplugusg4-aabbcc000001","', 50))
+    deliver(e, rpcReply('{"id":1,"src":"shellyplugusg4-aabbcc0000011","', 50))
     deliver(e, rpcReply('r":{"code":-103,"message":"Missing or bad argum', 50))
     expect(e.state.rpcPending != null && e.lastValue("lastSettingsWrite") == null, "a tail decides nothing without the reply length: ${e.events}")
     rpcLength(e, 112)                                                       // not the one length a success for id 14 has
@@ -1426,18 +1424,17 @@ check("trip: the load is judged on recent readings: 1700 W, then idle, then 900 
 check("plug settings: a stale tail of an earlier reply cannot confirm the next request; a success has one exact length") {
     def d = newDriver(powerLimitWatts: 1500, powerOnState: "previous")
     knownPower(d, 0)
-    d.state.rpcId = 12
-    d.updated(); d.advance(32_000)                                                           // id 13: the power-on state
+    d.updated(); d.advance(32_000)                                                           // id 1: the power-on state
     rpcLength(d, 81)
-    chunk(d, '{"id":13,"src":"shellyplugusg4-aabbcc000001","')                                // cut on the quote before result
+    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc0000011","')                               // cut on the quote before result (a src one character longer)
     expect(d.state.rpcPending != null, "an opening cut there names no outcome")
     chunk(d, 'lt":{"restart_required":false}}')
-    expect(d.lastValue("lastSettingsWrite") == "power-on state previous: accepted", "81 bytes is exactly a success for id 13: ${d.events}")
-    d.advance(2_000)                                                                         // id 14: the cutoff, sent and acknowledged
+    expect(d.lastValue("lastSettingsWrite") == "power-on state previous: accepted", "81 bytes is exactly a success for id 1 and that src: ${d.events}")
+    d.advance(2_000)                                                                         // id 2: the cutoff, sent and acknowledged
     d.advance(2_000)                                                                         // its first poll
     rpcLength(d, 112)                                                                        // the plug's answer is an error
-    chunk(d, 'lt":{"restart_required":false}}')                                              // a repeat of reply 13's tail, late
-    chunk(d, '{"id":14,"src":"shellyplugusg4-aabbcc000001","')
+    chunk(d, 'lt":{"restart_required":false}}')                                              // a repeat of reply 1's tail, late
+    chunk(d, '{"id":2,"src":"shellyplugusg4-aabbcc0000011","')
     expect(d.state.rpcPending != null && d.lastValue("lastSettingsWrite") == "power-on state previous: accepted", "112 bytes is no success: ${d.events}")
     chunk(d, 'r":{"code":-103,"message":"Missing or bad argum')
     expect(d.lastValue("lastSettingsWrite") == "power limit 1500 W: refused (error -103)", "${d.events}")
@@ -1500,10 +1497,10 @@ check("switch: a report that is neither 00 nor 01 is ignored") {
     expect(d.logsMatching("switch: FF is not an on/off value, ignored").size() == 1, "${d.logLines}")
 }
 
-check("plug settings: the RPC id wraps from 99 to 1; Configure forgets what the plug accepted but keeps the cutoff it runs") {
+check("plug settings: the RPC id wraps from 9 to 1; Configure forgets what the plug accepted but keeps the cutoff it runs") {
     def d = newDriver(powerLimitWatts: 1500)
     knownPower(d, 0)
-    d.state.rpcId = 99
+    d.state.rpcId = 9
     d.updated(); d.advance(32_000)
     expect(rpcRequests(d) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"power_limit":1500}}}'], "${rpcRequests(d)}")
     chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
@@ -1688,9 +1685,8 @@ check("plug settings: a cutoff needs a power reading from the current reporting 
 
 check("plug settings: a reply judged from its tail is judged again when the length arrives after the text") {
     def d = newDriver(powerLimitWatts: 1800)
-    d.state.rpcId = 13
-    d.updated(); d.advance(32_000)                                                           // id 14, polled
-    deliver(d, rpcReply('{"id":14,"src":"shellyplugusg4-aabbcc000001","', 50))
+    d.updated(); d.advance(32_000)                                                           // id 1, polled
+    deliver(d, rpcReply('{"id":1,"src":"shellyplugusg4-aabbcc0000011","', 50))                       // a src one character longer
     deliver(d, rpcReply('lt":{"restart_required":false}}', 31))
     expect(d.state.rpcPending != null && d.lastValue("lastSettingsWrite") == null, "without the length the tail proves nothing: ${d.events}")
     rpcLength(d, 81)
@@ -1701,12 +1697,11 @@ check("plug settings: a reply judged from its tail is judged again when the leng
 
 check("plug settings: a reply length before the first poll belongs to an earlier reply and is ignored") {
     def d = newDriver(powerLimitWatts: 1800)
-    d.state.rpcId = 13
-    d.updated(); d.advance(30_000)                                                           // id 14 sent and acknowledged, not yet polled
+    d.updated(); d.advance(30_000)                                                           // id 1 sent and acknowledged, not yet polled
     rpcLength(d, 81)                                                                         // a late answer to an earlier poll
     expect(d.state.rpcPending?.replyLength == null, "${d.state.rpcPending}")
     d.advance(2_000)                                                                         // the first poll
-    deliver(d, rpcReply('{"id":14,"src":"shellyplugusg4-aabbcc000001","', 50))
+    deliver(d, rpcReply('{"id":1,"src":"shellyplugusg4-aabbcc0000011","', 50))                       // a src one character longer
     deliver(d, rpcReply('lt":{"restart_required":false}}', 31))                              // a repeat of the earlier tail
     expect(d.state.rpcPending != null && d.lastValue("lastSettingsWrite") == null, "not confirmed on a stale length: ${d.events}")
     rpcLength(d, 112)
@@ -1790,6 +1785,147 @@ check("wifi: each frame gets its own 30 s to be acknowledged; three slow acknowl
     deliver(e, wifiAck())
     e.advance(31_000)                                                                        // the second frame waits in vain
     expect(e.lastValue("lastSettingsWrite") == "Wi-Fi Home Net: unconfirmed (not every write was acknowledged in 30 s; run setWifi again)", "${e.events}")
+}
+
+// --------------------------------------------------------------------------- fifth review (WOR-798, 1.4.5)
+
+check("plug settings: request ids stay 1 to 9, so the cut-short opening always names the outcome on this plug") {
+    def d = newDriver()
+    (1..10).each { int n ->
+        d.setBluetooth("on"); d.advance(2_000)
+        expect(rpcRequests(d).last().startsWith('{"id":' + (((n - 1) % 9) + 1) + ','), "request ${n}: ${rpcRequests(d).last()}")
+        chunk(d, '{"id":' + (((n - 1) % 9) + 1) + ',"src":"shellyplugusg4-aabbcc000001","r')  // 46 bytes: the r of result is in
+        expect(d.lastValue("lastSettingsWrite") == "Bluetooth on: accepted" && d.state.rpcPending == null, "request ${n}: ${d.events.last()}")
+    }
+    expect(d.state.rpcId == 1, "wrapped: ${d.state.rpcId}")
+}
+
+check("plug settings: a tail-only success needs the exact length for the restart_required value the tail shows, with no one-byte tolerance") {
+    def d = newDriver(powerLimitWatts: 1500, powerOnState: "previous")
+    knownPower(d, 0)
+    d.updated(); d.advance(32_000)                                                           // id 1, polled
+    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')                                 // accepted on its opening
+    d.advance(2_000); d.advance(2_000)                                                       // id 2 sent and polled
+    rpcLength(d, 80)                                                                         // reply 1's length (id 1, this plug's src), answered late
+    chunk(d, 't":{"restart_required":false}}')                                               // and reply 1's tail
+    chunk(d, '{"id":2,"src":"shellyplugusg4-aabbcc0000011","')                                // an opening cut on the quote (src one longer)
+    expect(d.state.rpcPending != null && d.lastValue("lastSettingsWrite") == "power-on state previous: accepted", "80 is not 81: ${d.events}")
+    rpcLength(d, 103)
+    chunk(d, 'r":{"code":-103,"message":"Missing or bad argum')
+    expect(d.lastValue("lastSettingsWrite") == "power limit 1500 W: refused (error -103)", "${d.events}")
+    def e = newDriver(powerLimitWatts: 1800)                                                 // a true value is one byte shorter, and exact too
+    e.updated(); e.advance(32_000)
+    rpcLength(e, 80)
+    deliver(e, rpcReply('{"id":1,"src":"shellyplugusg4-aabbcc0000011","', 50))
+    deliver(e, rpcReply('lt":{"restart_required":true}}', 30))
+    expect(e.lastValue("lastSettingsWrite") == "power limit 1800 W: accepted", "${e.events}")
+}
+
+check("trip: the load counts only readings since the plug was switched on; an earlier cycle's 2000 W is not this cycle's") {
+    def d = newDriver()
+    giveUnits(d, UNITS_020000FF)
+    d.on(); d.advance(500); deliver(d, frame("0006", "0000", "10", "01"))
+    deliver(d, frame("0B04", "050B", "29", hex(2000, 4)))
+    d.advance(1_000); d.off(); d.advance(500); deliver(d, frame("0006", "0000", "10", "00"))   // the hub switched it off
+    d.advance(1_000); deliver(d, frame("0B04", "050B", "29", hex(0, 4)))
+    d.advance(2_000); deliver(d, frame("0B04", "050B", "29", hex(0, 4)))                     // unplugged
+    d.advance(3_000); deliver(d, frame("0006", "0000", "10", "01"))                          // the button: on
+    d.advance(1_000); deliver(d, frame("0B04", "050B", "29", hex(0, 4)))                     // nothing plugged in
+    d.advance(2_000); deliver(d, frame("0006", "0000", "10", "00"))                          // the button: off, 11 s after the 2000 W
+    expect(d.lastValue("tripCount") == null, "an empty cycle is no trip: ${d.events}")
+    d.advance(1_000); deliver(d, frame("0006", "0000", "10", "01"))
+    d.advance(1_000); deliver(d, frame("0B04", "050B", "29", hex(1700, 4)))
+    d.advance(20_000); deliver(d, frame("0006", "0000", "10", "00"))
+    expect(d.lastValue("tripCount") == 1, "a loaded cycle still is: ${d.events}")
+}
+
+check("upgrade from 1.4.3: the last reading counts for a trip before the first new report; Configure and Save keep the confirmed cutoff") {
+    def d = newDriver()
+    giveUnits(d, UNITS_020000FF)
+    deliver(d, frame("0006", "0000", "10", "01"))
+    d.state.lastWatts = 2000; d.state.lastWattsMs = d.clockMs; d.state.remove("watts")      // state as 1.4.3 left it
+    d.advance(60_000)
+    deliver(d, frame("0006", "0000", "10", "00"))
+    expect(d.lastValue("tripCount") == 1 && d.lastValue("lastTrip").contains("at up to 2000 W"), "${d.events}")
+    def e = newDriver()
+    giveUnits(e, UNITS_020000FF)
+    e.state.plugSettings = [power_limit: 500]                                                // 1.4.3 confirmed 500 W, no cutoffWatts yet
+    e.configure()
+    expect(e.state.plugSettings == null && e.state.cutoffWatts == 500, "${e.state}")
+    e.on(); e.advance(500); deliver(e, frame("0006", "0000", "10", "01"))
+    deliver(e, frame("0B04", "050B", "29", hex(600, 4)))
+    e.advance(60_000); deliver(e, frame("0006", "0000", "10", "00"))
+    expect(e.lastValue("tripCount") == 1 && e.lastValue("lastTrip").contains("(limit 500 W)"), "${e.events}")
+    def f = newDriver()
+    f.state.plugSettings = [power_limit: 500]
+    f.updated()
+    expect(f.state.cutoffWatts == 500, "Save carries it too: ${f.state}")
+    def g = newDriver()
+    g.state.plugSettings = [power_limit: 500]; g.state.cutoffWatts = 1000                   // what the plug confirmed last wins
+    g.configure()
+    expect(g.state.cutoffWatts == 1000, "${g.state}")
+}
+
+check("wifi: a setup still being acknowledged is not forgotten as stale after 60 s") {
+    def d = newDriver()
+    d.setWifi("Home Net", "correct horse 42")
+    d.advance(25_000); deliver(d, wifiAck())                                                 // frame 2 at 25 s
+    d.advance(25_000); deliver(d, wifiAck())                                                 // Action 1 at 50 s
+    d.advance(11_000); d.applyPlugSettings()                                                 // 61 s: the stale check runs
+    expect(d.state.wifiPending?.network == "Home Net" && d.logsMatching("forgetting a Wi-Fi write").isEmpty(), "${d.state} ${d.logLines}")
+    d.advance(14_000); deliver(d, wifiAck())                                                 // 75 s
+    expect(d.lastValue("lastSettingsWrite").startsWith("Wi-Fi Home Net: accepted"), "${d.events}")
+}
+
+check("trip: a cycle whose one power report was parsed before its on report, or whose on report was lost, still counts its load") {
+    def d = newDriver()                                                                      // the 2000 W report overtakes the on report
+    giveUnits(d, UNITS_020000FF)
+    deliver(d, frame("0006", "0000", "10", "00"))
+    deliver(d, frame("0B04", "050B", "29", hex(2000, 4)))
+    d.advance(200); deliver(d, frame("0006", "0000", "10", "01"))                            // physical on, stamped after the reading
+    d.advance(30_000); deliver(d, frame("0B04", "050B", "29", hex(0, 4)))                    // the cut
+    d.advance(1_000); deliver(d, frame("0006", "0000", "10", "00"))
+    expect(d.lastValue("tripCount") == 1 && d.lastValue("lastTrip").contains("at up to 2000 W"), "${d.events}")
+    def e = newDriver()                                                                      // the on report was lost: the driver still shows off
+    giveUnits(e, UNITS_020000FF)
+    deliver(e, frame("0006", "0000", "10", "00"))
+    deliver(e, frame("0B04", "050B", "29", hex(2000, 4)))
+    e.advance(300_000); deliver(e, frame("0006", "0000", "10", "01"))                        // a read-back shows on, 5 min in
+    e.advance(60_000); deliver(e, frame("0006", "0000", "10", "00"))                         // the plug cuts out, no new report (steady load)
+    expect(e.lastValue("tripCount") == 1, "the reading of this reporting period is the load: ${e.events}")
+    def f = newDriver()                                                                      // but not a reading from before the period
+    giveUnits(f, UNITS_020000FF)
+    deliver(f, frame("0006", "0000", "10", "00"))
+    deliver(f, frame("0B04", "050B", "29", hex(2000, 4)))
+    f.advance(720_000); deliver(f, frame("0006", "0000", "10", "01"))                        // 12 min later
+    f.advance(60_000); deliver(f, frame("0006", "0000", "10", "00"))
+    expect(f.lastValue("tripCount") == null, "a 13 min old reading says nothing: ${f.events}")
+    def g = newDriver()                                                                      // nor when the on itself is older than the period
+    giveUnits(g, UNITS_020000FF)
+    deliver(g, frame("0B04", "050B", "29", hex(2000, 4)))
+    g.advance(100); deliver(g, frame("0006", "0000", "10", "01"))
+    g.advance(700_000); deliver(g, frame("0006", "0000", "10", "00"))                        // silent for longer than it reports
+    expect(g.lastValue("tripCount") == null, "${g.events}")
+    def h = newDriver()                                                                      // a reading at the on counts, however long ago
+    giveUnits(h, UNITS_020000FF)
+    deliver(h, frame("0B04", "050B", "29", hex(2000, 4)))
+    deliver(h, frame("0006", "0000", "10", "01"))
+    h.advance(700_000); deliver(h, frame("0006", "0000", "10", "00"))
+    expect(h.lastValue("tripCount") == 1, "${h.events}")
+}
+
+check("plug settings: a reply to another request drops its length too, so it cannot confirm this request's cut opening") {
+    def d = newDriver(powerLimitWatts: 1800)
+    d.updated(); d.advance(32_000)                                                           // id 1, polled
+    rpcLength(d, 81)                                                                         // an earlier reply's length, answered late
+    deliver(d, rpcReply('{"id":7,"src":"shellyplugusg4-aabbcc0000011","r', 50))               // and its opening: not ours
+    expect(d.state.rpcPending?.replyLength == null && d.state.rpcPending?.head == null, "${d.state.rpcPending}")
+    deliver(d, rpcReply('{"id":1,"src":"shellyplugusg4-aabbcc0000011","', 50))                // ours, cut on the quote (src one longer)
+    deliver(d, rpcReply('lt":{"restart_required":false}}', 31))                              // the earlier reply's tail
+    expect(d.state.rpcPending != null && d.lastValue("lastSettingsWrite") == null, "no length of our own yet: ${d.events}")
+    rpcLength(d, 103)
+    deliver(d, rpcReply('r":{"code":-103,"message":"Missing or bad argum', 50))
+    expect(d.lastValue("lastSettingsWrite") == "power limit 1800 W: refused (error -103)", "${d.events}")
 }
 
 // --------------------------------------------------------------------------- summary
