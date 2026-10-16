@@ -181,7 +181,7 @@ MUTANTS = {
     "M74": ("a Wi-Fi setup has 30 s in all, not 30 s per frame",
             '    runIn(WIFI_TIMEOUT_SECONDS, "wifiTimeout")                        // each frame gets its own time to be acknowledged\n', "\n"),
     "M75": ("a cutoff goes out on a power reading from half an hour ago",
-            '''    if (age > reportMaxSecondsSetting() * 1000L + 60000L) return "the plug's last power reading is ${Math.round(age / 60000.0)} min old; refresh, then save again"\n''', "\n"),
+            '''    if (age > powerReadingFreshMs()) return "the plug's last power reading is ${Math.round(age / 60000.0)} min old; refresh, then save again"\n''', "\n"),
     "M76": ("the cutoff guard is not run again before each chunk, so a load that rose mid-transfer gets the cutoff anyway",
             "        String blocker = retryBlocker(pending)\n        if (blocker) {\n            rpcResult", "        String blocker = null\n        if (blocker) {\n            rpcResult"),
     "M77": ("a reply whose length arrives after its text is not judged again, so a success ends in a retry",
@@ -204,6 +204,10 @@ MUTANTS = {
             "    return len == expected\n", "    return len == expected || len == expected - 1\n"),
     "M86": ("the trip load looks back into the previous cycle, so an unplugged cycle trips on the last cycle's load",
             "        if (onAt != null && (r[1] as Long) < onAt) continue\n", "\n"),
+    "M87": ("a cycle whose one power report was parsed before its on report has no load, so its trip is missed",
+            "        if (before != null) load = toDecimal(before[0])\n", "\n"),
+    "M88": ("a reply to another request keeps its length, which then confirms this request's cut opening",
+            '        pending.remove("replyLength")                                           // its length is as stale as its text\n', "\n"),
 }
 
 

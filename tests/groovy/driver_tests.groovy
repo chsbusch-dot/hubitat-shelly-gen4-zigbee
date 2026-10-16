@@ -1800,7 +1800,7 @@ check("plug settings: request ids stay 1 to 9, so the cut-short opening always n
     expect(d.state.rpcId == 1, "wrapped: ${d.state.rpcId}")
 }
 
-check("plug settings: a tail-only success needs the exact length for its own restart_required value; the previous request's length is one short") {
+check("plug settings: a tail-only success needs the exact length for the restart_required value the tail shows, with no one-byte tolerance") {
     def d = newDriver(powerLimitWatts: 1500, powerOnState: "previous")
     knownPower(d, 0)
     d.updated(); d.advance(32_000)                                                           // id 1, polled
@@ -1875,6 +1875,57 @@ check("wifi: a setup still being acknowledged is not forgotten as stale after 60
     expect(d.state.wifiPending?.network == "Home Net" && d.logsMatching("forgetting a Wi-Fi write").isEmpty(), "${d.state} ${d.logLines}")
     d.advance(14_000); deliver(d, wifiAck())                                                 // 75 s
     expect(d.lastValue("lastSettingsWrite").startsWith("Wi-Fi Home Net: accepted"), "${d.events}")
+}
+
+check("trip: a cycle whose one power report was parsed before its on report, or whose on report was lost, still counts its load") {
+    def d = newDriver()                                                                      // the 2000 W report overtakes the on report
+    giveUnits(d, UNITS_020000FF)
+    deliver(d, frame("0006", "0000", "10", "00"))
+    deliver(d, frame("0B04", "050B", "29", hex(2000, 4)))
+    d.advance(200); deliver(d, frame("0006", "0000", "10", "01"))                            // physical on, stamped after the reading
+    d.advance(30_000); deliver(d, frame("0B04", "050B", "29", hex(0, 4)))                    // the cut
+    d.advance(1_000); deliver(d, frame("0006", "0000", "10", "00"))
+    expect(d.lastValue("tripCount") == 1 && d.lastValue("lastTrip").contains("at up to 2000 W"), "${d.events}")
+    def e = newDriver()                                                                      // the on report was lost: the driver still shows off
+    giveUnits(e, UNITS_020000FF)
+    deliver(e, frame("0006", "0000", "10", "00"))
+    deliver(e, frame("0B04", "050B", "29", hex(2000, 4)))
+    e.advance(300_000); deliver(e, frame("0006", "0000", "10", "01"))                        // a read-back shows on, 5 min in
+    e.advance(60_000); deliver(e, frame("0006", "0000", "10", "00"))                         // the plug cuts out, no new report (steady load)
+    expect(e.lastValue("tripCount") == 1, "the reading of this reporting period is the load: ${e.events}")
+    def f = newDriver()                                                                      // but not a reading from before the period
+    giveUnits(f, UNITS_020000FF)
+    deliver(f, frame("0006", "0000", "10", "00"))
+    deliver(f, frame("0B04", "050B", "29", hex(2000, 4)))
+    f.advance(720_000); deliver(f, frame("0006", "0000", "10", "01"))                        // 12 min later
+    f.advance(60_000); deliver(f, frame("0006", "0000", "10", "00"))
+    expect(f.lastValue("tripCount") == null, "a 13 min old reading says nothing: ${f.events}")
+    def g = newDriver()                                                                      // nor when the on itself is older than the period
+    giveUnits(g, UNITS_020000FF)
+    deliver(g, frame("0B04", "050B", "29", hex(2000, 4)))
+    g.advance(100); deliver(g, frame("0006", "0000", "10", "01"))
+    g.advance(700_000); deliver(g, frame("0006", "0000", "10", "00"))                        // silent for longer than it reports
+    expect(g.lastValue("tripCount") == null, "${g.events}")
+    def h = newDriver()                                                                      // a reading at the on counts, however long ago
+    giveUnits(h, UNITS_020000FF)
+    deliver(h, frame("0B04", "050B", "29", hex(2000, 4)))
+    deliver(h, frame("0006", "0000", "10", "01"))
+    h.advance(700_000); deliver(h, frame("0006", "0000", "10", "00"))
+    expect(h.lastValue("tripCount") == 1, "${h.events}")
+}
+
+check("plug settings: a reply to another request drops its length too, so it cannot confirm this request's cut opening") {
+    def d = newDriver(powerLimitWatts: 1800)
+    d.updated(); d.advance(32_000)                                                           // id 1, polled
+    rpcLength(d, 81)                                                                         // an earlier reply's length, answered late
+    deliver(d, rpcReply('{"id":7,"src":"shellyplugusg4-aabbcc0000011","r', 50))               // and its opening: not ours
+    expect(d.state.rpcPending?.replyLength == null && d.state.rpcPending?.head == null, "${d.state.rpcPending}")
+    deliver(d, rpcReply('{"id":1,"src":"shellyplugusg4-aabbcc0000011","', 50))                // ours, cut on the quote (src one longer)
+    deliver(d, rpcReply('lt":{"restart_required":false}}', 31))                              // the earlier reply's tail
+    expect(d.state.rpcPending != null && d.lastValue("lastSettingsWrite") == null, "no length of our own yet: ${d.events}")
+    rpcLength(d, 103)
+    deliver(d, rpcReply('r":{"code":-103,"message":"Missing or bad argum', 50))
+    expect(d.lastValue("lastSettingsWrite") == "power limit 1800 W: refused (error -103)", "${d.events}")
 }
 
 // --------------------------------------------------------------------------- summary

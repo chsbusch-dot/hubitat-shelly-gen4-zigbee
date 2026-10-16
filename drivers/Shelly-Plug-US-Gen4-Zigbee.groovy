@@ -66,13 +66,16 @@
  *                    counts only readings since the last switch-on and falls back to the last reading after an upgrade;
  *                    Configure and Save carry a cutoff confirmed under 1.4.3 into cutoffWatts; a Wi-Fi setup that is
  *                    still being acknowledged is not forgotten after 60 s (WOR-798)
+ * 1.4.6  2026-10-15  Review of 1.4.5: a cycle whose only power report was parsed before its on report (or whose on
+ *                    report was lost) starts from the newest reading of the current reporting period, so the trip
+ *                    is still counted; a reply to another request also drops its length (WOR-801)
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.4.5" }
+static String driverVersion() { "1.4.6" }
 
 metadata {
     definition(
@@ -462,9 +465,8 @@ private String powerLimitBlocker(Integer limit) {
     if (limit >= PLUG_MAX_WATTS) return null                                   // the maximum cannot undercut a load
     Long lastMs = state.lastWattsMs as Long
     if (lastMs == null) return "the plug has not reported its power draw yet; refresh, then save again"
-    // The plug reports power at least once per longest interval; a reading older than that says nothing about now.
     long age = now() - lastMs
-    if (age > reportMaxSecondsSetting() * 1000L + 60000L) return "the plug's last power reading is ${Math.round(age / 60000.0)} min old; refresh, then save again"
+    if (age > powerReadingFreshMs()) return "the plug's last power reading is ${Math.round(age / 60000.0)} min old; refresh, then save again"
     Long onAt = state.onAtMs as Long
     if (device.currentValue("switch") == "on" && onAt != null && lastMs < onAt) return "no power reading since the plug was switched on; refresh, then save again"
     BigDecimal drawing = toDecimal(state.lastWatts)                            // the plug's own watts, not the adjusted display
@@ -779,6 +781,7 @@ private void judgeRpcReply() {
         logDebug "RPC reply ${id.group(1)} is not ours (${pending.id})"
         pending.remove("head")
         pending.remove("tail")
+        pending.remove("replyLength")                                           // its length is as stale as its text
         state.rpcPending = pending
         return
     }
@@ -1170,14 +1173,22 @@ private void checkTrip() {
  * first; an earlier cycle's load is not this one's). A protection trip reports the cut, 0 W once or more, moments
  * before the off: within the grace time a reading that drops to under half the load before it is that cut, so the
  * load before it stands. An older reading stands as it is: a heater that fell to 50 W minutes ago is judged at
- * 50 W, whatever it drew before.
+ * 50 W, whatever it drew before. The plug reports power on a change, so a steady heater reports once per cycle,
+ * and that one report can be parsed before the on report it came with, or the on report can be lost and the on
+ * stamped later: the newest reading of the current reporting period taken before the on starts the cycle off,
+ * as long as the on itself is that recent (the review of 1.4.5).
  */
 private BigDecimal tripLoad() {
     List readings = (state.watts ?: []) as List
     if (!readings && state.lastWatts != null) readings = [[state.lastWatts, state.lastWattsMs ?: 0L]]   // 1.4.3 kept one reading
     Long onAt = state.onAtMs as Long
     long graceFrom = now() - TRIP_DROP_GRACE_MS
+    long fresh = now() - powerReadingFreshMs()
     BigDecimal load = null
+    if (onAt != null && onAt >= fresh) {
+        List before = readings.find { (it[1] as Long) < onAt && (it[1] as Long) >= fresh } as List
+        if (before != null) load = toDecimal(before[0])
+    }
     for (int k = readings.size() - 1; k >= 0; k--) {                           // oldest first
         List r = readings[k] as List
         BigDecimal w = toDecimal(r[0])
@@ -1492,6 +1503,11 @@ private BigDecimal powerChangeSetting() {
 
 private Integer healthTimeoutSeconds() {
     return reportMaxSecondsSetting() * 3 + 60
+}
+
+/** The plug reports power at least once per longest interval; a reading older than that says nothing about now. */
+private long powerReadingFreshMs() {
+    return reportMaxSecondsSetting() * 1000L + 60000L
 }
 
 /** A reporting threshold in the plug's raw units: at least 1, at most what the attribute type holds. */
