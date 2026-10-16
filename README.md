@@ -107,13 +107,14 @@ last accepted (see [Plug settings](#plug-settings)).
 Besides on, off, refresh and configure:
 
 - **identify** blinks the plug's LED for a few seconds (10 by default) so you can find it.
-- **setBluetooth** turns the plug's Bluetooth on or off. In Zigbee mode the Shelly app reaches the plug
-  only over Bluetooth, for example to give it Wi-Fi so it can update its firmware. The outcome shows in
-  `lastSettingsWrite` and `bluetooth`.
+- **setBluetooth** turns the plug's Bluetooth on or off, together with Shelly's RPC over Bluetooth, which
+  is what the Shelly app uses: in Zigbee mode it reaches the plug only that way, for example to give it
+  Wi-Fi so it can update its firmware. The outcome shows in `lastSettingsWrite` and `bluetooth`.
 - **setWifi** gives the plug a Wi-Fi network: type the network name and its password (leave the password
   empty for an open network). The plug needs Wi-Fi to update its firmware, in Zigbee mode too. The
-  password goes to the plug only; the driver does not log it or keep it. The outcome shows in
-  `lastSettingsWrite`, then `wifiStatus` and `wifiIp` show whether the plug joined.
+  password goes to the plug only; the driver does not log it or keep it. Each of the three writes has
+  30 seconds to be acknowledged. The outcome shows in `lastSettingsWrite`, then `wifiStatus` and `wifiIp`
+  show whether the plug joined.
 
 None of them touches the relay.
 
@@ -130,8 +131,11 @@ Refresh afterwards: the driver sees the new firmware and reads the plug's units 
 The plug protects itself: above 15 A (1800 W), or above its own power limit, it switches off. When the
 plug turns itself off within ten seconds of the hub switching it on (or of a button press, if it was
 drawing power by then), or while its recent load was at least 90% of the cutoff the plug confirmed (1800 W unless you set one), the driver counts a trip, logs a
-warning and updates `tripCount` and `lastTrip`. A rule can watch `tripCount` and stop switching the plug
-back on. Pressing the plug's button on and off is not a trip.
+warning and updates `tripCount` and `lastTrip`. The recent load is taken from the plug's last few power
+readings: the 0 W it reports once or twice after cutting the load does not hide what it carried. A rule
+can watch `tripCount` and stop switching the plug back on. Pressing the plug's button on and off is not a
+trip. Configure keeps the cutoff the plug confirmed; a plug that was factory reset is back at 1800 W, so
+save the settings again after one.
 
 One plug in testing ran a heater that drew about 2,000 W. It tripped two seconds after every `on`, every
 ten minutes, for hours. If you see trips, the load is too big for the plug.
@@ -146,8 +150,10 @@ result shows in `lastSettingsWrite`. A setting that comes back refused or unconf
 next time you save the settings.
 
 The driver will not set a cutoff below what the plug is drawing at that moment, since the plug would
-switch off at once; that check runs before every attempt, and a cutoff below the plug's maximum waits until
-the plug has reported its draw.
+switch off at once. That check runs before every part of the write goes out, and it needs a power reading
+from the current reporting period, taken since the plug was last switched on; otherwise the write waits
+for a Refresh and the next save. A setting you change while an earlier write is still out is sent on its
+own; the earlier write is dropped.
 
 ## Reporting
 

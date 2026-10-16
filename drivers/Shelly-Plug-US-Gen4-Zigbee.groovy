@@ -54,13 +54,20 @@
  *                    reply length; a cutoff needs a power reading since the last switch-on, in the plug's own watts;
  *                    default responses to reads are not refusals; each acknowledged chunk restarts the write timeout;
  *                    only 00 and 01 are switch states (WOR-793)
+ * 1.4.4  2026-10-15  Fourth review: the cutoff guard runs again before every chunk and needs a reading from the current
+ *                    reporting period; a preference saved while an old write was out is not skipped with it; the driver
+ *                    sends its Wi-Fi reads itself, so the quiet window is measured from the real send; an RPC reply is
+ *                    judged by its opening, by its tail only with the reply length, and again when the length comes last;
+ *                    trips keep a few readings, so two 0 W reports still show the load; Configure keeps the confirmed
+ *                    cutoff; Bluetooth off also clears rpc.enable; a default response refusing the power-on write falls
+ *                    back to RPC; each Wi-Fi frame gets its own 30 s (WOR-793)
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.4.3" }
+static String driverVersion() { "1.4.4" }
 
 metadata {
     definition(
@@ -179,10 +186,11 @@ metadata {
 // An off the hub did not send, this soon after an on or at this share of the power limit, is a trip.
 @Field static final Long TRIP_WINDOW_MS = 10000L
 @Field static final BigDecimal TRIP_LOAD_SHARE = 0.9
-// A reading this far below the one before it is a drop. A drop within the grace time of an off is the plug
-// cutting its load (a protection trip reports 0 W right before off), so the reading before it is the load.
+// A reading this far below the load before it is a drop. A drop within the grace time of an off is the plug
+// cutting its load (a protection trip reports 0 W, once or more, right before off), so the load before it counts.
 @Field static final BigDecimal TRIP_PEAK_DECAY = 0.5
 @Field static final Long TRIP_DROP_GRACE_MS = 15000L
+@Field static final Integer WATTS_HISTORY = 6                                   // recent power readings kept for that
 @Field static final Integer PLUG_MAX_WATTS = 1800
 @Field static final Long RX_STAMP_EVERY_MS = 60000L
 @Field static final Long COMMAND_ECHO_MS = 10000L
@@ -235,6 +243,7 @@ void updated() {
     migrateFromOtherDrivers()
     scheduleHousekeeping()
     runIn(2, "applyReporting")
+    state.remove("prevWatts")                                               // 1.4.3 kept one earlier reading; watts keeps a few
     // After the reporting setup's radio traffic; only settings the user filled in are ever sent.
     state.remove("settingsSkip")
     runIn(30, "applyPlugSettings")
@@ -258,6 +267,7 @@ List<String> configure() {
     cmds += optionalReads()
     // The scale answers arrive within seconds; reporting thresholds are raw units, so wait for them.
     runIn(8, "applyReporting")
+    runIn(3, "wifiRead")                              // sent by the driver, not queued here: its Action 0 is timed (setWifi)
     return cmds
 }
 
@@ -269,7 +279,7 @@ List<String> refresh() {
     cmds += zigbee.readAttribute(0x0702, 0x0000)
     if (state.powerFactorSupported == true) cmds += zigbee.readAttribute(0x0B04, 0x0510)
     if (state.lightLevelSupported == true) cmds += zigbee.readAttribute(0xFC21, 0x0000, [mfgCode: MFG_SHELLY])
-    if (state.wifiSupported != false) cmds += wifiReads()
+    if (state.wifiSupported != false) runIn(1, "wifiRead")          // sent by the driver, so its Action 0 is timed (setWifi)
     cmds += zigbee.readAttribute(0x0000, 0x4000)
     if (!scaleComplete()) cmds += scaleReads()
     return cmds
@@ -435,15 +445,19 @@ void setBluetooth(String onOff) {
         return
     }
     logInfo "turning Bluetooth ${v}"
-    Map config = v == "on" ? [enable: true, rpc: [enable: true]] : [enable: false]
+    // rpc.enable is the field current firmware honours (the top-level enable went with 2.0.0); both are sent either way.
+    Map config = v == "on" ? [enable: true, rpc: [enable: true]] : [enable: false, rpc: [enable: false]]
     sendRpc("BLE.SetConfig", [config: config], "bluetooth", v)
 }
 
-/** Why a cutoff must not go out right now, or null: the plug draws near or above it, or its draw is unknown. */
+/** Why a cutoff must not go out right now, or null: the plug draws near or above it, or its draw is unknown or old. */
 private String powerLimitBlocker(Integer limit) {
     if (limit >= PLUG_MAX_WATTS) return null                                   // the maximum cannot undercut a load
     Long lastMs = state.lastWattsMs as Long
     if (lastMs == null) return "the plug has not reported its power draw yet; refresh, then save again"
+    // The plug reports power at least once per longest interval; a reading older than that says nothing about now.
+    long age = now() - lastMs
+    if (age > reportMaxSecondsSetting() * 1000L + 60000L) return "the plug's last power reading is ${Math.round(age / 60000.0)} min old; refresh, then save again"
     Long onAt = state.onAtMs as Long
     if (device.currentValue("switch") == "on" && onAt != null && lastMs < onAt) return "no power reading since the plug was switched on; refresh, then save again"
     BigDecimal drawing = toDecimal(state.lastWatts)                            // the plug's own watts, not the adjusted display
@@ -451,17 +465,20 @@ private String powerLimitBlocker(Integer limit) {
     return null
 }
 
-/** The cutoff the plug confirmed, or its maximum; a preference it refused or has not received yet does not count. */
+/**
+ * The cutoff the plug confirmed, or its maximum; a preference it refused or has not received yet does not count.
+ * Configure forgets the settings so that they are sent again, but not the cutoff: the plug still runs it.
+ */
 private BigDecimal acceptedPowerLimit() {
-    def accepted = ((state.plugSettings ?: [:]) as Map).power_limit
+    def accepted = ((state.plugSettings ?: [:]) as Map).power_limit ?: state.cutoffWatts
     return accepted != null ? toDecimal(accepted) : PLUG_MAX_WATTS
 }
 
-/** A retry repeats a settings write: not once the preference moved on, and never a cutoff the load forbids now. */
+/** Why a settings write must not go on (its next chunk, its retry), or null: the preference moved on, or the load forbids the cutoff now. */
 private String retryBlocker(Map pending) {
     String key = pending.key as String
     if (key == "bluetooth") return null
-    if (pendingPlugSettings()[key] != pending.value) return "the setting changed before the retry"
+    if (pendingPlugSettings()[key] != pending.value) return "the preference changed in the meantime"
     if (key == "power_limit") return powerLimitBlocker(pending.value as Integer)
     return null
 }
@@ -551,12 +568,15 @@ private void settingsOutcome(String key, value, String result, String detail, bo
     String text = "${what}: ${result}${detail ? ' (' + detail + ')' : ''}"
     if (result == "accepted") {
         state.plugSettings = ((state.plugSettings ?: [:]) as Map) + [(key): value]
+        if (key == "power_limit") state.cutoffWatts = value                 // outlives Configure: the plug keeps running it
         if (key == "bluetooth") sendEvent(name: "bluetooth", value: value)
         logInfo text
     } else {
         logWarn text
+        // Skipped until the next Save, but only while the preference still asks for the value that failed: one
+        // saved while the old write was still out must not inherit its failure.
         List skip = (state.settingsSkip ?: []) as List
-        if (skipOnFail && !skip.contains(key)) state.settingsSkip = skip + [key]
+        if (skipOnFail && pendingPlugSettings()[key] == value) state.settingsSkip = skip + [key]
     }
     sendEvent(name: "lastSettingsWrite", value: text)
     runIn(2, "applyPlugSettings")
@@ -600,6 +620,14 @@ private void rpcWriteAcked() {
     pending.at = now()                                                          // progress: the write is alive
     state.rpcPending = pending
     if (sent < chunks.size()) {
+        // What held when the request was built may not hold now: the load can rise and a preference can change
+        // while the chunks go out one acknowledgement at a time. The plug is left with part of a request; the
+        // next TxCtl starts a new one.
+        String blocker = retryBlocker(pending)
+        if (blocker) {
+            rpcResult("not sent", blocker)
+            return
+        }
         sendZigbee([rpcFrame("02", chunks[sent])])
         runIn(RPC_TIMEOUT_SECONDS, "rpcTimeout")                                // each acknowledged chunk restarts the clock
     } else {
@@ -690,9 +718,10 @@ private void parseRpc(Map descMap) {
             long len = Long.parseLong(r.value as String, 16)
             logDebug "RPC reply length ${len}"
             Map pending = state.rpcPending as Map
-            if (pending != null && len > 0) {
+            if (pending != null && len > 0 && ((pending.polls ?: 0) as int) > 0) {   // before the first poll it is an earlier reply's
                 pending.replyLength = len
                 state.rpcPending = pending
+                judgeRpcReply()                                               // the text may have come first
             }
         } else if (r.attrId == "0000") {
             handleRpcChunk(hexToText(r.value as String))
@@ -701,12 +730,8 @@ private void parseRpc(Map descMap) {
 }
 
 /**
- * Collects reply chunks and judges them. Chunks can arrive out of order (2026-10-15: the 30-byte tail
- * of an 80-byte reply reached the driver before its 50-byte opening), so the opening is kept apart from
- * the rest. Hubitat also cuts chunks short (that opening arrived as 46 of 50 bytes, ending in "r), so
- * only the opening is trusted: the request id, then "error" anywhere, or "result" (or the r of it,
- * right after src). An error opening is cut the same way: 4612's -103 arrived as ...","e then
- * ":{"code":-103,... in the next chunk.
+ * Collects reply chunks. They can arrive out of order (2026-10-15: the 30-byte tail of an 80-byte reply
+ * reached the driver before its 50-byte opening), so the opening is kept apart from the rest.
  */
 private void handleRpcChunk(String text) {
     Map pending = state.rpcPending as Map
@@ -722,11 +747,23 @@ private void handleRpcChunk(String text) {
         pending.tail = tail.length() > 300 ? tail.substring(0, 300) : tail
     }
     state.rpcPending = pending
-    String head = pending.head as String
-    if (!head) {
-        logDebug "RPC reply tail before its opening: ${text}"
-        return
-    }
+    if (!pending.head) logDebug "RPC reply tail before its opening: ${text}"
+    judgeRpcReply()
+}
+
+/**
+ * Judges what has arrived of the reply. The opening decides: the request id, then "error" or "result".
+ * Hubitat hands over 46 of its 50 bytes, so with a one-digit request id it still ends on the r of result
+ * or the e of error, right after src (4612's -103 arrived as ...","e), while with a two-digit id it ends
+ * on the quote before them (2026-10-15, id 14) and says nothing. Then the plug's reply length tells with
+ * the tail: a SetConfig success has exactly one length for this id and plug, anything else is an error.
+ * A tail never decides on its own, and never against the opening: a read answered late carries the
+ * previous reply's tail into this request (fourth review).
+ */
+private void judgeRpcReply() {
+    Map pending = state.rpcPending as Map
+    String head = pending?.head as String
+    if (!head) return
     def id = head =~ /^\{"id":(\d+)[,}]/
     if (!id.find()) return
     if ((id.group(1) as Integer) != (pending.id as Integer)) {
@@ -737,27 +774,30 @@ private void handleRpcChunk(String text) {
         return
     }
     String tail = (pending.tail ?: "") as String
-    String reply = head + tail
-    // The key after src names the outcome, but Hubitat hands over 46 of the first 50 bytes: with a
-    // one-digit request id the opening ends on the r of result, with a two-digit id one character
-    // earlier, on the quote before it (2026-10-15, id 14). Then the tail tells: a SetConfig result
-    // carries restart_required, an error carries its code.
-    boolean refused = reply.contains('"error"') || (head =~ /"src":"[^"]*","e/).find() || tail.contains('"code":')
-    boolean accepted = reply.contains('"result"') || (head =~ /"src":"[^"]*","r/).find() || (tail.contains('restart_required') && successLengthMatches(head, pending))
+    boolean refused = head.contains('"error"') || (head =~ /"src":"[^"]*","e/).find()
+    boolean accepted = head.contains('"result"') || (head =~ /"src":"[^"]*","r/).find()
+    if (!refused && !accepted && !(head =~ /"src":"[^"]*","/).find()) {
+        // Cut inside src (a longer device name than this plug's): no length can be worked out, so the text as a whole tells.
+        refused = (head + tail).contains('"error"')
+        accepted = (head + tail).contains('"result"')
+    } else if (!refused && !accepted && pending.replyLength != null) {
+        if (tail.contains('restart_required') && successLengthMatches(head, pending)) accepted = true
+        else if (tail.contains('"code":') && !successLengthMatches(head, pending)) refused = true
+    }
     if (refused) {
-        def code = reply =~ /"code":(-?\d+)/
+        def code = (head + tail) =~ /"code":(-?\d+)/
         rpcResult("refused", code.find() ? "error ${code.group(1)}" : "error, its code cut off")
     } else if (accepted) {
         rpcResult("accepted", null)
     } else {
-        logDebug "RPC reply not judged yet: ${reply}"
+        logDebug "RPC reply not judged yet: ${head}${tail}"
     }
 }
 
 /**
- * A tail alone says "result" only when the reply length the plug reported is exactly what a SetConfig success
- * for this request id and this plug measures (restart_required false or true). An error reply is far longer,
- * and a stale tail of an earlier reply must not confirm the request after it (2026-10-15 review).
+ * Whether the reply length the plug reported is exactly what a SetConfig success for this request id and this
+ * plug measures (restart_required false or true). An error reply is longer, and a stale tail of an earlier reply
+ * must not confirm the request after it (2026-10-15 review).
  */
 private static boolean successLengthMatches(String head, Map pending) {
     Long len = pending.replyLength as Long
@@ -844,6 +884,7 @@ private boolean wifiSendNext(Map pending) {
     state.wifiPending = pending
     state.wifiBusyMs = now()
     sendZigbee([rest[0]])
+    runIn(WIFI_TIMEOUT_SECONDS, "wifiTimeout")                        // each frame gets its own time to be acknowledged
     return true
 }
 
@@ -1099,13 +1140,7 @@ private void checkTrip() {
     BigDecimal peak = toDecimal(state.peakWatts)
     BigDecimal limit = acceptedPowerLimit()
     boolean quick = onAt != null && now() - onAt <= TRIP_WINDOW_MS && (state.onType == "digital" || peak > 0)
-    // The load the plug carried: its latest reading, or the one before when the latest is the drop to (near)
-    // nothing that a protection trip reports moments before the off. An old reading is not refreshed by the
-    // off, so a heater that fell to 50 W minutes ago is judged at 50 W, whatever it drew before.
-    BigDecimal load = toDecimal(state.lastWatts)
-    BigDecimal prev = toDecimal(state.prevWatts)
-    Long lastMs = state.lastWattsMs as Long
-    if (lastMs != null && now() - lastMs <= TRIP_DROP_GRACE_MS && load < prev * TRIP_PEAK_DECAY) load = prev
+    BigDecimal load = tripLoad()
     boolean heavy = load >= limit * TRIP_LOAD_SHARE
     if (!quick && !heavy) return
     BigDecimal shown = quick ? peak : load
@@ -1115,6 +1150,24 @@ private void checkTrip() {
     logWarn "${text}"
     sendEvent(name: "tripCount", value: count, descriptionText: "${device.displayName} ${text}")
     sendEvent(name: "lastTrip", value: text, isStateChange: true)
+}
+
+/**
+ * The load the plug carried into the off, from its recent power readings (state.watts, newest first). A
+ * protection trip reports the cut, 0 W once or more, moments before the off: within the grace time a reading
+ * that drops to under half the load before it is that cut, so the load before it stands. An older reading
+ * stands as it is: a heater that fell to 50 W minutes ago is judged at 50 W, whatever it drew before.
+ */
+private BigDecimal tripLoad() {
+    List readings = (state.watts ?: []) as List
+    long graceFrom = now() - TRIP_DROP_GRACE_MS
+    BigDecimal load = null
+    for (int k = readings.size() - 1; k >= 0; k--) {                           // oldest first
+        List r = readings[k] as List
+        BigDecimal w = toDecimal(r[0])
+        if (load == null || (r[1] as Long) < graceFrom || w >= load * TRIP_PEAK_DECAY) load = w
+    }
+    return load ?: 0
 }
 
 private void handleMeasurement(String q, String hex, String encoding) {
@@ -1133,9 +1186,9 @@ private void handleMeasurement(String q, String hex, String encoding) {
     if (device.currentValue(d.event as String)?.toString() != value.toString()) logInfo text
     if (q == "power") {
         // The plug's own watts, before any adjustment: its protection and the cutoff go by these.
-        state.prevWatts = state.lastWatts ?: 0
         state.lastWatts = plain
         state.lastWattsMs = now()
+        state.watts = [[plain, now()]] + ((state.watts ?: []) as List).take(WATTS_HISTORY - 1)
         if (device.currentValue("switch") == "on" && plain > toDecimal(state.peakWatts)) state.peakWatts = plain
     }
     sendEvent(name: d.event, value: value, unit: d.unit, descriptionText: text)
@@ -1186,6 +1239,7 @@ private void handleSoftwareBuild(String value, String encoding) {
         state.remove("fallbackWarned")
         ["startUpOnOff", "startUpWritable", "powerFactorSupported", "lightLevelSupported", "wifiSupported"].each { state.remove(it) }
         sendZigbee(scaleReads() + optionalReads())                   // new firmware may offer what the old one refused
+        runIn(3, "wifiRead")
         runIn(8, "applyReporting")
     }
 }
@@ -1214,6 +1268,10 @@ private void parseCatchall(String cluster, Map descMap) {
             return
         case "0B":   // Default Response
             if (data.size() >= 2 && data[1] != "00") {
+                if (cluster == "0006" && data[0] == "02" && state.startUpPending != null) {   // a refusal of the power-on write
+                    startUpRefused("0006/4003 write: ${zclStatus(data[1])}")
+                    return
+                }
                 String text = "the plug answered command ${data[0]} on cluster ${cluster} with ${zclStatus(data[1])}"
                 if (cluster == "FC21") state.lightLevelSupported = false
                 if (cluster in OPTIONAL_CLUSTERS) logInfo text else logWarn "${text}"
@@ -1285,8 +1343,7 @@ private List<String> optionalReads() {
     cmds += zigbee.readAttribute(0x0006, 0x4003)                                          // StartUpOnOff
     cmds += zigbee.readAttribute(0x0B04, 0x0510)                                          // PowerFactor
     cmds += zigbee.readAttribute(0xFC21, [0x0000, 0x0001, 0x0002], [mfgCode: MFG_SHELLY])  // listed since fw 2.0.1
-    cmds += wifiReads()
-    return cmds
+    return cmds                                                                           // Wi-Fi: wifiRead, scheduled by the caller
 }
 
 private void handlePowerOnState(String hex) {
@@ -1553,6 +1610,7 @@ private static String zclStatus(String hex) {
         case "87": return "invalid value"
         case "88": return "read-only attribute"
         case "81": return "unsupported command"
+        case "82": return "unsupported general command"
         default:   return "status 0x${hex}"
     }
 }
