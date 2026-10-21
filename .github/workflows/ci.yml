@@ -1,0 +1,50 @@
+name: ci
+
+# Three layers, because they catch different things:
+#
+#   package      -- packageManifest.json agrees with the driver (version, name, namespace, path), and
+#                   the user-visible files carry no em or en dashes. Plus the @Field initializer check.
+#   execution    -- runs the driver's own methods against a stubbed Hubitat runtime: scaling from the
+#                   plug's units, bundled reports, reporting thresholds, no relay command in configure.
+#   hub-compile  -- compiles the driver with Groovy 2.4, the line the hub runs. groovy:4 accepts code the
+#                   hub refuses (the first draft passed all 40 execution checks and failed here).
+#
+# None of them touches a hub or a plug.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # No dependencies: JSON and regex over the repo's own files.
+      - name: Manifest and HPM listing agree with the driver; no dashes in user-visible text
+        run: python tests/check_package.py
+      - name: No @Field initializer names another @Field
+        run: python tests/check_hubitat_fields.py
+
+  execution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The runner has docker, and the harness uses the same groovy:4-alpine image locally.
+      - name: Run the driver's methods against a stubbed Hubitat runtime
+        run: ./tests/groovy/run.sh
+        env:
+          HUB_COMPILE: skip   # run.sh's Groovy 2.4 compile runs as the hub-compile job instead
+
+  hub-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # groovy:2.4-jdk8 (Groovy 2.4.16, OpenJDK 8). The script fails before compiling anything unless
+      # every fixture in tests/groovy/hub_refuses/ is refused with the message it expects.
+      - name: Compile the driver with the hub's Groovy (2.4)
+        run: ./tests/groovy/hub_compile.sh

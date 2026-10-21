@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+
+# Editor / IDE
+.idea/
+*.iml
+.vscode/
+
+# Scratch
+*.log
+*.tmp
+
+# Secrets never live in this repo
+*.env
+.env*
+
+# Mutation check output (tests/mutation/run.sh)
+tests/mutation/out/
+
+# Hub facts kept out of the public repo
+CLAUDE.local.md
+
+# Claude Code worktrees and session files
+.claude/

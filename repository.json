@@ -1,0 +1,18 @@
+{
+    "author": "Chris Busch",
+    "gitHubUrl": "https://github.com/chsbusch-dot",
+    "packages": [
+        {
+            "id": "d7a74ad1-e0ab-4378-a512-1ace0d01ba21",
+            "name": "Shelly Plug US Gen4 (Zigbee)",
+            "category": "Control",
+            "location": "https://raw.githubusercontent.com/chsbusch-dot/hubitat-shelly-gen4-zigbee/main/packageManifest.json",
+            "description": "Driver for the Shelly Plug US Gen4 (S4PL-00116US) in Zigbee mode: switch, power, energy, voltage, current and frequency in the plug's own units, trip detection, and the plug's settings from Hubitat (power-on state, overpower cutoff, auto-off timer, current and voltage limits, LED ring, Bluetooth, Wi-Fi).",
+            "tags": [
+                "Zigbee",
+                "Energy Monitoring",
+                "Lights & Switches"
+            ]
+        }
+    ]
+}
