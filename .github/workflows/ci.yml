@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: "3.12"
       # No dependencies: JSON and regex over the repo's own files.
-      - name: Manifest agrees with the driver; no dashes in user-visible text
+      - name: Manifest and HPM listing agree with the driver; no dashes in user-visible text
         run: python tests/check_package.py
       - name: No @Field initializer names another @Field
         run: python tests/check_hubitat_fields.py

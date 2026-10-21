@@ -27,7 +27,8 @@ off and on again while it configures, which you don't want on a plug that runs a
 
 ## Install
 
-**Hubitat Package Manager:** choose Install, then From a URL, and paste:
+**Hubitat Package Manager:** choose Install, then Search by Keywords, and search for
+`Shelly Plug US Gen4`. If the search does not find it yet, choose From a URL and paste:
 
 ```
 https://raw.githubusercontent.com/chsbusch-dot/hubitat-shelly-gen4-zigbee/main/packageManifest.json

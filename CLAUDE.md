@@ -12,6 +12,7 @@ safety relevant.
 |---|---|---|
 | `drivers/Shelly-Plug-US-Gen4-Zigbee.groovy` | The driver | yes |
 | `packageManifest.json` | HPM manifest; version must equal the driver's `driverVersion()` | n/a |
+| `repository.json` | HPM listing (author, one package pointing at the manifest, category, tags); registered in HubitatCommunity/hubitat-packagerepositories | n/a |
 | `README.md` | Public documentation (user-visible: no em/en dashes; no Codex humanizer pass for GitHub READMEs, Chris 2026-10-15) | n/a |
 | `reference/shelly-1pm-gen4-v1.2.1-additionalAttrs.groovy` | Upstream joaomf/kkossev driver as installed on the hub (code 2795) with the 2026-10-11 additionalAttrs patch. Reference only | no |
 | `tests/` | Package check, @Field check, Groovy execution tests, Groovy 2.4 compile, mutation check | n/a |
