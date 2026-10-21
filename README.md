@@ -95,7 +95,7 @@ Those corrections would make the new readings wrong. The 1PM driver's leftover a
 | Power, voltage, current adjustment | 0 % | Leave at 0 unless your readings are off against a meter you trust. 2 reads 2% higher. |
 | AC frequency offset | 0 Hz | Added to every frequency reading. |
 | After a power cut, the plug turns | keep | Off, on, or back to how it was. "Keep" leaves the plug's own setting alone. Pick "on" only if you want a heater to come back by itself. |
-| Switch off above (W) | empty | The plug's own overpower cutoff, 100 to 1800 W. Empty leaves the plug's setting alone. |
+| Switch off above (W) | 1800 W | The plug's own overpower cutoff, 100 to 1800 W. 1800 W is the plug's maximum and its own default. Empty leaves the plug's setting alone. |
 | Switch off by itself after | empty | The plug's auto-off timer: it switches itself off this many seconds after each switch-on, from the hub or from its button. 0 turns the timer off, 86400 (a day) is the most. Empty leaves the plug's setting alone. |
 | Switch off above (A) | empty | The plug's own overcurrent cutoff, 1 to 15 A. Empty leaves the plug's setting alone. |
 | Switch off above (V) | empty | The plug's own overvoltage cutoff, 100 to 300 V. A limit within 5% of the last mains reading is held back, since a normal swing would trip it. Empty leaves the plug's setting alone. |

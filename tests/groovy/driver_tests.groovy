@@ -755,7 +755,7 @@ check("light level: a plug without FC21 gets no light-level reporting") {
 }
 
 check("plug settings: nothing is ever sent while the preferences are empty or on keep") {
-    [[:], [powerOnState: "keep"]].each { Map prefs ->
+    [[powerLimitWatts: null], [powerLimitWatts: null, powerOnState: "keep"]].each { Map prefs ->
         def d = newDriver(prefs)
         d.updated()
         d.advance(60_000)
@@ -903,7 +903,7 @@ check("plug settings: the limit is clamped to 100..1800 W and never set below wh
 }
 
 check("bluetooth: on enables BLE and BLE RPC through BLE.SetConfig, confirmed by the reply; the relay is not touched") {
-    def d = newDriver()
+    def d = newDriver(powerLimitWatts: null)
     d.setBluetooth("on")
     expect(rpcRequests(d) == ['{"id":1,"method":"BLE.SetConfig","params":{"config":{"enable":true,"rpc":{"enable":true}}}}'], "${rpcRequests(d)}")
     d.advance(2_000)                                                        // the first poll
@@ -1271,13 +1271,13 @@ check("led: the LED preferences go out as one PLUGS_UI.SetConfig after the other
 }
 
 check("led: every LED preference at keep sends nothing; a bad night time falls back; night mode off sends enable false") {
-    def d = newDriver()
+    def d = newDriver(powerLimitWatts: null)
     d.updated(); d.advance(40_000)
     expect(!d.sentCommands().any { it.contains("0xFC01") }, "${d.hubCommands}")
-    def e = newDriver(ledNightMode: "on", ledNightFrom: "25:99", ledNightTo: "7:00", ledNightBrightness: 0)
+    def e = newDriver(powerLimitWatts: null, ledNightMode: "on", ledNightFrom: "25:99", ledNightTo: "7:00", ledNightBrightness: 0)
     e.updated(); e.advance(32_000)
     expect(rpcRequests(e) == ['{"id":1,"method":"PLUGS_UI.SetConfig","params":{"config":{"leds":{"night_mode":{"enable":true,"brightness":0,"active_between":["22:00","06:00"]}}}}}'], "${rpcRequests(e)}")
-    def f = newDriver(ledNightMode: "off", ledMode: "off")
+    def f = newDriver(powerLimitWatts: null, ledNightMode: "off", ledMode: "off")
     f.updated(); f.advance(32_000)
     expect(rpcRequests(f) == ['{"id":1,"method":"PLUGS_UI.SetConfig","params":{"config":{"leds":{"mode":"off","night_mode":{"enable":false}}}}}'], "${rpcRequests(f)}")
 }
@@ -1478,7 +1478,7 @@ check("plug settings: a default response to a read is not a refusal; one to a wr
 }
 
 check("plug settings: a slow transfer that keeps being acknowledged is not restarted") {
-    def d = newDriver(ledMode: "switch", ledOnColor: "green", ledOffColor: "red", ledBrightness: 50, ledNightMode: "on")
+    def d = newDriver(powerLimitWatts: null, ledMode: "switch", ledOnColor: "green", ledOffColor: "red", ledBrightness: 50, ledNightMode: "on")
     d.onHubCommand = null
     d.updated(); d.advance(30_000)
     int frames = d.state.rpcPending.chunks.size() + 1                                        // TxCtl and the chunks
@@ -1941,8 +1941,25 @@ check("metadata: 1.5.0 adds the auto-off, current limit and voltage limit prefer
     expect(md.commands.contains("wifiOff"), "${md.commands}")
 }
 
+check("metadata: 1.5.2 defaults the power limit preference to 1800 W, the plug's maximum, with its range unchanged") {
+    def d = newDriver()
+    def md = d.metadataRecord
+    expect(md.inputNamed("powerLimitWatts").defaultValue == 1800 && md.inputNamed("powerLimitWatts").range == "100..1800", "${md.inputNamed('powerLimitWatts')}")
+    expect(d.settings.powerLimitWatts == 1800, "${d.settings}")
+    d.updated()                                                             // the first save of a new install
+    d.advance(30_000)
+    expect(rpcRequests(d) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"power_limit":1800}}}'], "the default goes out without a power reading, alone: ${rpcRequests(d)}")
+    d.advance(2_000)
+    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(d.lastValue("lastSettingsWrite") == "power limit 1800 W: accepted" && d.state.plugSettings == [power_limit: 1800] && d.state.cutoffWatts == 1800, "${d.events} ${d.state}")
+    d.updated()
+    d.advance(30_000)
+    expect(rpcRequests(d).size() == 1, "a second save sends nothing new: ${rpcRequests(d)}")
+    expect(d.zigbee.switchCommands.isEmpty(), "the relay is not touched")
+}
+
 check("plug settings: the auto-off timer goes out as auto_off plus its delay, 0 turns it off, empty leaves the plug alone, the delay is clamped to a day") {
-    def d = newDriver(autoOffSeconds: 600)
+    def d = newDriver(powerLimitWatts: null, autoOffSeconds: 600)
     d.updated()
     d.advance(30_000)
     expect(rpcRequests(d) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"auto_off":true,"auto_off_delay":600}}}'], "${rpcRequests(d)}")
@@ -1956,11 +1973,11 @@ check("plug settings: the auto-off timer goes out as auto_off plus its delay, 0 
     d.advance(2_000)
     chunk(d, '{"id":2,"src":"shellyplugusg4-aabbcc000001","r')
     expect(d.lastValue("lastSettingsWrite") == "auto-off off: accepted" && d.state.plugSettings.auto_off == 0, "${d.events} ${d.state.plugSettings}")
-    def e = newDriver()
+    def e = newDriver(powerLimitWatts: null)
     e.updated()
     e.advance(30_000)
     expect(rpcRequests(e).isEmpty(), "empty sends nothing: ${rpcRequests(e)}")
-    def c = newDriver(autoOffSeconds: 90000)
+    def c = newDriver(powerLimitWatts: null, autoOffSeconds: 90000)
     c.updated()
     c.advance(30_000)
     expect(rpcRequests(c) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"auto_off":true,"auto_off_delay":86400}}}'], "clamped to a day: ${rpcRequests(c)}")
@@ -1968,7 +1985,7 @@ check("plug settings: the auto-off timer goes out as auto_off plus its delay, 0 
 }
 
 check("trip: an off when the auto-off timer the driver set is due is logged as the timer, not counted as a trip; an early off under load still is") {
-    def d = newDriver(autoOffSeconds: 600)
+    def d = newDriver(powerLimitWatts: null, autoOffSeconds: 600)
     giveUnits(d, UNITS_020000FF)
     d.updated()
     d.advance(30_000)
@@ -2020,7 +2037,7 @@ check("wifiOff: sends WiFi.SetConfig with the station disabled, waits for anothe
 }
 
 check("plug settings: a current limit is held back under a load near it or without a reading, sent with a fresh reading under it, and 15 A needs no reading") {
-    def d = newDriver(currentLimitAmps: 10)
+    def d = newDriver(powerLimitWatts: null, currentLimitAmps: 10)
     giveUnits(d, UNITS_020000FF)
     deliver(d, frame("0006", "0000", "10", "01"))
     deliver(d, frame("0B04", "0508", "21", hex(17349, 4)))
@@ -2028,11 +2045,11 @@ check("plug settings: a current limit is held back under a load near it or witho
     d.advance(30_000)
     expect(rpcRequests(d).isEmpty(), "${rpcRequests(d)}")
     expect(d.lastValue("lastSettingsWrite") == "current limit 10 A: not sent (the plug is drawing 17.349 A and would switch itself off)", "${d.events}")
-    def n = newDriver(currentLimitAmps: 10)
+    def n = newDriver(powerLimitWatts: null, currentLimitAmps: 10)
     n.updated()
     n.advance(30_000)
     expect(rpcRequests(n).isEmpty() && n.lastValue("lastSettingsWrite") == "current limit 10 A: not sent (the plug has not reported its current yet; refresh, then save again)", "${n.events}")
-    def s = newDriver(currentLimitAmps: 10)
+    def s = newDriver(powerLimitWatts: null, currentLimitAmps: 10)
     giveUnits(s, UNITS_020000FF)
     deliver(s, frame("0B04", "0508", "21", hex(2000, 4)))
     s.updated()
@@ -2041,7 +2058,7 @@ check("plug settings: a current limit is held back under a load near it or witho
     s.advance(2_000)
     chunk(s, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
     expect(s.lastValue("lastSettingsWrite") == "current limit 10 A: accepted" && s.state.plugSettings.current_limit == 10, "${s.events} ${s.state.plugSettings}")
-    def c = newDriver(currentLimitAmps: 20)
+    def c = newDriver(powerLimitWatts: null, currentLimitAmps: 20)
     c.updated()
     c.advance(30_000)
     expect(rpcRequests(c) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"current_limit":15}}}'], "15 A is the plug's maximum: ${rpcRequests(c)}")
@@ -2049,24 +2066,24 @@ check("plug settings: a current limit is held back under a load near it or witho
 }
 
 check("plug settings: a voltage limit is held back while the mains is within 5% of it, without a reading or with a stale one, sent otherwise, and clamped to 100 to 300 V") {
-    def d = newDriver(voltageLimitVolts: 110)
+    def d = newDriver(powerLimitWatts: null, voltageLimitVolts: 110)
     giveUnits(d, UNITS_020000FF)
     deliver(d, frame("0B04", "0505", "21", hex(11440, 4)))
     d.updated()
     d.advance(30_000)
     expect(rpcRequests(d).isEmpty() && d.lastValue("lastSettingsWrite") == "voltage limit 110 V: not sent (the mains is at 114.4 V and the plug would switch itself off at 110 V)", "${d.events}")
-    def n = newDriver(voltageLimitVolts: 130)
+    def n = newDriver(powerLimitWatts: null, voltageLimitVolts: 130)
     n.updated()
     n.advance(30_000)
     expect(rpcRequests(n).isEmpty() && n.lastValue("lastSettingsWrite") == "voltage limit 130 V: not sent (the plug has not reported its voltage yet; refresh, then save again)", "${n.events}")
-    def o = newDriver(voltageLimitVolts: 130)
+    def o = newDriver(powerLimitWatts: null, voltageLimitVolts: 130)
     giveUnits(o, UNITS_020000FF)
     deliver(o, frame("0B04", "0505", "21", hex(11440, 4)))
     o.advance(1_770_000)
     o.updated()
     o.advance(30_000)
     expect(rpcRequests(o).isEmpty() && o.lastValue("lastSettingsWrite") == "voltage limit 130 V: not sent (the plug's last voltage reading is 30 min old; refresh, then save again)", "${o.events}")
-    def s = newDriver(voltageLimitVolts: 130)
+    def s = newDriver(powerLimitWatts: null, voltageLimitVolts: 130)
     giveUnits(s, UNITS_020000FF)
     deliver(s, frame("0B04", "0505", "21", hex(11440, 4)))
     s.updated()
@@ -2075,19 +2092,19 @@ check("plug settings: a voltage limit is held back while the mains is within 5% 
     s.advance(2_000)
     chunk(s, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
     expect(s.lastValue("lastSettingsWrite") == "voltage limit 130 V: accepted" && s.state.plugSettings.voltage_limit == 130, "${s.events} ${s.state.plugSettings}")
-    def m = newDriver(voltageLimitVolts: 118)
+    def m = newDriver(powerLimitWatts: null, voltageLimitVolts: 118)
     giveUnits(m, UNITS_020000FF)
     deliver(m, frame("0B04", "0505", "21", hex(11440, 4)))
     m.updated()
     m.advance(30_000)
     expect(rpcRequests(m).isEmpty() && m.lastValue("lastSettingsWrite") == "voltage limit 118 V: not sent (the mains is at 114.4 V and the plug would switch itself off at 118 V)", "within 5% of the mains: ${m.events}")
-    def c = newDriver(voltageLimitVolts: 500)
+    def c = newDriver(powerLimitWatts: null, voltageLimitVolts: 500)
     giveUnits(c, UNITS_020000FF)
     deliver(c, frame("0B04", "0505", "21", hex(11440, 4)))
     c.updated()
     c.advance(30_000)
     expect(rpcRequests(c) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"voltage_limit":300}}}'], "clamped to 300 V: ${rpcRequests(c)}")
-    def l = newDriver(voltageLimitVolts: 50)
+    def l = newDriver(powerLimitWatts: null, voltageLimitVolts: 50)
     giveUnits(l, UNITS_020000FF)
     deliver(l, frame("0B04", "0505", "21", hex(11440, 4)))
     l.updated()
@@ -2120,7 +2137,7 @@ check("plug settings: the Switch.SetConfig fields go out one write at a time, po
 
 check("trip: the auto-off timer is judged from the latest switch-on and the delay in force then, within a window; the marker survives Configure") {
     def timerOn = { int seconds, int id ->
-        def x = newDriver(autoOffSeconds: seconds)
+        def x = newDriver(powerLimitWatts: null, autoOffSeconds: seconds)
         giveUnits(x, UNITS_020000FF)
         x.updated()
         x.advance(30_000)
@@ -2194,7 +2211,7 @@ check("trip: the auto-off timer is judged from the latest switch-on and the dela
 
 check("trip: an off while the plug carried at least 90% of the current limit it confirmed is an overcurrent trip; the limit survives Configure") {
     def limited = {
-        def x = newDriver(currentLimitAmps: 10)
+        def x = newDriver(powerLimitWatts: null, currentLimitAmps: 10)
         giveUnits(x, UNITS_020000FF)
         deliver(x, frame("0B04", "0508", "21", hex(2000, 4)))
         x.updated()
@@ -2226,7 +2243,7 @@ check("trip: an off while the plug carried at least 90% of the current limit it 
     def e = limited()
     cycle(e, 5000, 600)
     expect(e.logsMatching("WARN Test Plug: switched itself off").isEmpty() && e.lastValue("tripCount") == null, "5 A under a 10 A limit is no trip: ${e.logLines}")
-    def n = newDriver()
+    def n = newDriver(powerLimitWatts: null)
     giveUnits(n, UNITS_020000FF)
     cycle(n, 9500, 1100)
     expect(n.logsMatching("WARN Test Plug: switched itself off").isEmpty(), "9.5 A without a limit (15 A) is no trip: ${n.logLines}")
@@ -2234,7 +2251,7 @@ check("trip: an off while the plug carried at least 90% of the current limit it 
 
 check("trip: an off while the mains was within 2% of the voltage limit the plug confirmed is an overvoltage trip; not without a limit or with a stale reading; the limit survives Configure") {
     def limited = {
-        def x = newDriver(voltageLimitVolts: 130)
+        def x = newDriver(powerLimitWatts: null, voltageLimitVolts: 130)
         giveUnits(x, UNITS_020000FF)
         deliver(x, frame("0B04", "0505", "21", hex(11440, 4)))
         x.updated()
@@ -2267,7 +2284,7 @@ check("trip: an off while the mains was within 2% of the voltage limit the plug 
     def s = limited()
     cycle(s, 12800, 1_770_000)
     expect(s.logsMatching("WARN Test Plug: switched itself off").isEmpty(), "a 30 min old reading does not count: ${s.logLines}")
-    def n = newDriver()
+    def n = newDriver(powerLimitWatts: null)
     giveUnits(n, UNITS_020000FF)
     cycle(n, 12800, 1_000)
     expect(n.logsMatching("WARN Test Plug: switched itself off").isEmpty(), "no limit, no overvoltage trip: ${n.logLines}")

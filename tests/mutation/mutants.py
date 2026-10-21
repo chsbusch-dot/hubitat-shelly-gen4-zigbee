@@ -256,6 +256,8 @@ MUTANTS = {
             ', voltage_limit: "cutoffVolts"]', "]"),
     "M112": ("only the last current reading is kept, so the 0 A before the off hides the current the plug cut",
             "        state.amps = [[plain, now()]] + ((state.amps ?: []) as List).take(WATTS_HISTORY - 1)\n", "\n"),
+    "M113": ("the power limit preference loses its 1800 W default, so a new install keeps whatever limit the plug holds",
+            'range: "100..1800", defaultValue: 1800,', 'range: "100..1800",'),
 }
 
 

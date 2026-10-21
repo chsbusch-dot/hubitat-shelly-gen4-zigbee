@@ -80,13 +80,16 @@
  *                    voltage limit within 5 % of the mains is held back, and one outside 100 to 300 V is clamped;
  *                    wifiOff waits for a staged Wi-Fi setup; the Wi-Fi state is read back after a refused or
  *                    unconfirmed wifiOff as well (WOR-851)
+ * 1.5.2  2026-10-21  The overpower cutoff preference defaults to 1800 W, the plug's maximum and its own default, so a
+ *                    new install shows the limit the plug runs at and sends it on the first save; an empty field
+ *                    still keeps the plug's setting (WOR-862)
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.5.1" }
+static String driverVersion() { "1.5.2" }
 
 metadata {
     definition(
@@ -148,8 +151,8 @@ metadata {
         input name: "powerOnState", type: "enum", title: "After a power cut, the plug turns",
               options: ["keep": "Keep the plug's own setting", "off": "Off", "on": "On (a heater comes back on by itself)", "previous": "Back to how it was"],
               defaultValue: "keep"
-        input name: "powerLimitWatts", type: "number", title: "Switch off above (W)", range: "100..1800",
-              description: "The plug switches itself OFF when the load draws more than this. Leave empty to keep the plug's own setting; 1800 W is its maximum."
+        input name: "powerLimitWatts", type: "number", title: "Switch off above (W)", range: "100..1800", defaultValue: 1800,
+              description: "The plug switches itself OFF when the load draws more than this. 1800 W is the plug's maximum and its own default. Clear the field to keep the plug's own setting."
         input name: "autoOffSeconds", type: "number", title: "Switch off by itself after (s)", range: "0..86400",
               description: "The plug switches itself OFF this many seconds after each switch-on, from the hub or the button. 0 turns the timer off; leave empty to keep the plug's own setting."
         input name: "currentLimitAmps", type: "number", title: "Switch off above (A)", range: "1..15",
