@@ -1928,6 +1928,177 @@ check("plug settings: a reply to another request drops its length too, so it can
     expect(d.lastValue("lastSettingsWrite") == "power limit 1800 W: refused (error -103)", "${d.events}")
 }
 
+// --------------------------------------------------------------------------- 1.5.0: auto-off timer, current and voltage limits, wifiOff
+
+check("metadata: 1.5.0 adds the auto-off, current limit and voltage limit preferences, empty by default, and the wifiOff command") {
+    def d = newDriver()
+    def md = d.metadataRecord
+    ["autoOffSeconds", "currentLimitAmps", "voltageLimitVolts"].each { String name ->
+        expect(md.inputNamed(name) != null && md.inputNamed(name).defaultValue == null, "${name}: ${md.inputNamed(name)}")
+    }
+    expect(md.inputNamed("autoOffSeconds").range == "0..86400" && md.inputNamed("currentLimitAmps").range == "1..15" && md.inputNamed("voltageLimitVolts").range == "100..300", "${md.inputs}")
+    expect(md.commands.contains("wifiOff"), "${md.commands}")
+}
+
+check("plug settings: the auto-off timer goes out as auto_off plus its delay, 0 turns it off, empty leaves the plug alone, the delay is clamped to a day") {
+    def d = newDriver(autoOffSeconds: 600)
+    d.updated()
+    d.advance(30_000)
+    expect(rpcRequests(d) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"auto_off":true,"auto_off_delay":600}}}'], "${rpcRequests(d)}")
+    d.advance(2_000)
+    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(d.lastValue("lastSettingsWrite") == "auto-off after 600 s: accepted" && d.state.plugSettings.auto_off == 600, "${d.events} ${d.state.plugSettings}")
+    d.settings.autoOffSeconds = 0
+    d.updated()
+    d.advance(30_000)
+    expect(rpcRequests(d).last() == '{"id":2,"method":"Switch.SetConfig","params":{"id":0,"config":{"auto_off":false}}}', "0 turns the timer off: ${rpcRequests(d)}")
+    d.advance(2_000)
+    chunk(d, '{"id":2,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(d.lastValue("lastSettingsWrite") == "auto-off off: accepted" && d.state.plugSettings.auto_off == 0, "${d.events} ${d.state.plugSettings}")
+    def e = newDriver()
+    e.updated()
+    e.advance(30_000)
+    expect(rpcRequests(e).isEmpty(), "empty sends nothing: ${rpcRequests(e)}")
+    def c = newDriver(autoOffSeconds: 90000)
+    c.updated()
+    c.advance(30_000)
+    expect(rpcRequests(c) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"auto_off":true,"auto_off_delay":86400}}}'], "clamped to a day: ${rpcRequests(c)}")
+    [d, e, c].each { expect(it.zigbee.switchCommands.isEmpty(), "the relay is not touched") }
+}
+
+check("trip: an off when the auto-off timer the driver set is due is logged as the timer, not counted as a trip; an early off under load still is") {
+    def d = newDriver(autoOffSeconds: 600)
+    giveUnits(d, UNITS_020000FF)
+    d.updated()
+    d.advance(30_000)
+    d.advance(2_000)
+    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(d.state.plugSettings.auto_off == 600, "positive control: the timer was accepted: ${d.state.plugSettings}")
+    d.on()
+    d.advance(500)
+    deliver(d, frame("0006", "0000", "10", "01"))
+    d.advance(597_000)
+    deliver(d, frame("0B04", "050B", "29", hex(1986, 4)))
+    d.advance(500)
+    deliver(d, frame("0006", "0000", "10", "00"))
+    expect(d.eventsNamed("switch").last().type == "physical", "the off is still a physical off: ${d.eventsNamed('switch')}")
+    expect(d.logsMatching("WARN Test Plug: switched itself off").isEmpty(), "no trip at 597.5 s under 1986 W: ${d.logLines}")
+    expect(d.logsMatching("INFO Test Plug: switched itself off by its auto-off timer (600 s after it was switched on)").size() == 1, "${d.logLines}")
+    d.on()
+    d.advance(500)
+    deliver(d, frame("0006", "0000", "10", "01"))
+    d.advance(1_300)
+    deliver(d, frame("0B04", "050B", "29", hex(1986, 4)))
+    d.advance(1_100)
+    deliver(d, frame("0006", "0000", "10", "00"))
+    expect(d.logsMatching("WARN Test Plug: switched itself off").size() == 1 && d.lastValue("tripCount") == 1, "an off 2 s after the on under 1986 W is a trip: ${d.logLines}")
+}
+
+check("wifiOff: sends WiFi.SetConfig with the station disabled, waits for another write, reads the Wi-Fi state back when accepted, names itself when unconfirmed") {
+    def d = newDriver()
+    d.wifiOff()
+    expect(rpcRequests(d) == ['{"id":1,"method":"WiFi.SetConfig","params":{"config":{"sta":{"enable":false}}}}'], "${rpcRequests(d)}")
+    expect(d.logsMatching("INFO Test Plug: turning Wi-Fi off").size() == 1, "${d.logLines}")
+    d.wifiOff()
+    expect(rpcRequests(d).size() == 1 && d.lastValue("lastSettingsWrite") == "Wi-Fi off: not sent (another write is in progress; try again in a minute)", "${d.events}")
+    d.advance(2_000)
+    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(d.lastValue("lastSettingsWrite") == "Wi-Fi off: accepted", "${d.events}")
+    expect(d.state.wifiReadsLeft == 4 && d.dueAt.wifiRead == d.clockMs + 10_000, "the Wi-Fi state is read back: ${d.state} ${d.dueAt}")
+    expect(d.state.settingsSkip == null, "a command is not a preference: ${d.state}")
+    def t = newDriver()
+    t.wifiOff()
+    t.advance(50_000)
+    expect(t.lastValue("lastSettingsWrite") == "Wi-Fi off: unconfirmed (no readable answer in 2 tries; run wifiOff again)", "${t.events}")
+    expect(t.state.settingsSkip == null && t.dueAt.wifiRead == null, "${t.state} ${t.dueAt}")
+    def w = newDriver()
+    w.setWifi("Home Net", "correct horse 42")
+    w.wifiOff()
+    expect(rpcRequests(w).isEmpty() && w.lastValue("lastSettingsWrite") == "Wi-Fi off: not sent (a Wi-Fi setup is still being sent; try again in a minute)", "${w.events}")
+    [d, t, w].each { expect(it.zigbee.switchCommands.isEmpty(), "the relay is not touched") }
+}
+
+check("plug settings: a current limit is held back under a load near it or without a reading, sent with a fresh reading under it, and 15 A needs no reading") {
+    def d = newDriver(currentLimitAmps: 10)
+    giveUnits(d, UNITS_020000FF)
+    deliver(d, frame("0006", "0000", "10", "01"))
+    deliver(d, frame("0B04", "0508", "21", hex(17349, 4)))
+    d.updated()
+    d.advance(30_000)
+    expect(rpcRequests(d).isEmpty(), "${rpcRequests(d)}")
+    expect(d.lastValue("lastSettingsWrite") == "current limit 10 A: not sent (the plug is drawing 17.349 A and would switch itself off)", "${d.events}")
+    def n = newDriver(currentLimitAmps: 10)
+    n.updated()
+    n.advance(30_000)
+    expect(rpcRequests(n).isEmpty() && n.lastValue("lastSettingsWrite") == "current limit 10 A: not sent (the plug has not reported its current yet; refresh, then save again)", "${n.events}")
+    def s = newDriver(currentLimitAmps: 10)
+    giveUnits(s, UNITS_020000FF)
+    deliver(s, frame("0B04", "0508", "21", hex(2000, 4)))
+    s.updated()
+    s.advance(30_000)
+    expect(rpcRequests(s) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"current_limit":10}}}'], "${rpcRequests(s)}")
+    s.advance(2_000)
+    chunk(s, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(s.lastValue("lastSettingsWrite") == "current limit 10 A: accepted" && s.state.plugSettings.current_limit == 10, "${s.events} ${s.state.plugSettings}")
+    def c = newDriver(currentLimitAmps: 20)
+    c.updated()
+    c.advance(30_000)
+    expect(rpcRequests(c) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"current_limit":15}}}'], "15 A is the plug's maximum: ${rpcRequests(c)}")
+    [d, n, s, c].each { expect(it.zigbee.switchCommands.isEmpty(), "the relay is not touched") }
+}
+
+check("plug settings: a voltage limit is held back while the mains is above it, without a reading or with a stale one, and sent otherwise") {
+    def d = newDriver(voltageLimitVolts: 110)
+    giveUnits(d, UNITS_020000FF)
+    deliver(d, frame("0B04", "0505", "21", hex(11440, 4)))
+    d.updated()
+    d.advance(30_000)
+    expect(rpcRequests(d).isEmpty() && d.lastValue("lastSettingsWrite") == "voltage limit 110 V: not sent (the mains is at 114.4 V and the plug would switch itself off)", "${d.events}")
+    def n = newDriver(voltageLimitVolts: 130)
+    n.updated()
+    n.advance(30_000)
+    expect(rpcRequests(n).isEmpty() && n.lastValue("lastSettingsWrite") == "voltage limit 130 V: not sent (the plug has not reported its voltage yet; refresh, then save again)", "${n.events}")
+    def o = newDriver(voltageLimitVolts: 130)
+    giveUnits(o, UNITS_020000FF)
+    deliver(o, frame("0B04", "0505", "21", hex(11440, 4)))
+    o.advance(1_770_000)
+    o.updated()
+    o.advance(30_000)
+    expect(rpcRequests(o).isEmpty() && o.lastValue("lastSettingsWrite") == "voltage limit 130 V: not sent (the plug's last voltage reading is 30 min old; refresh, then save again)", "${o.events}")
+    def s = newDriver(voltageLimitVolts: 130)
+    giveUnits(s, UNITS_020000FF)
+    deliver(s, frame("0B04", "0505", "21", hex(11440, 4)))
+    s.updated()
+    s.advance(30_000)
+    expect(rpcRequests(s) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"voltage_limit":130}}}'], "${rpcRequests(s)}")
+    s.advance(2_000)
+    chunk(s, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(s.lastValue("lastSettingsWrite") == "voltage limit 130 V: accepted" && s.state.plugSettings.voltage_limit == 130, "${s.events} ${s.state.plugSettings}")
+    [d, n, o, s].each { expect(it.zigbee.switchCommands.isEmpty(), "the relay is not touched") }
+}
+
+check("plug settings: the Switch.SetConfig fields go out one write at a time, power limit first, then auto-off, then the current limit") {
+    def d = newDriver(powerLimitWatts: 1200, autoOffSeconds: 600, currentLimitAmps: 10)
+    giveUnits(d, UNITS_020000FF)
+    deliver(d, frame("0B04", "0505", "21", hex(11440, 4), [more("0508", "21", hex(2000, 4)), more("050B", "29", hex(230, 4))]))
+    d.updated()
+    d.advance(30_000)
+    expect(rpcRequests(d) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"power_limit":1200}}}'], "${rpcRequests(d)}")
+    d.advance(2_000)
+    chunk(d, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+    d.advance(2_000)
+    expect(rpcRequests(d).size() == 2 && rpcRequests(d)[1] == '{"id":2,"method":"Switch.SetConfig","params":{"id":0,"config":{"auto_off":true,"auto_off_delay":600}}}', "${rpcRequests(d)}")
+    d.advance(2_000)
+    chunk(d, '{"id":2,"src":"shellyplugusg4-aabbcc000001","r')
+    d.advance(2_000)
+    expect(rpcRequests(d).size() == 3 && rpcRequests(d)[2] == '{"id":3,"method":"Switch.SetConfig","params":{"id":0,"config":{"current_limit":10}}}', "${rpcRequests(d)}")
+    d.advance(2_000)
+    chunk(d, '{"id":3,"src":"shellyplugusg4-aabbcc000001","r')
+    d.advance(60_000)
+    expect(rpcRequests(d).size() == 3 && d.state.plugSettings == [power_limit: 1200, auto_off: 600, current_limit: 10], "nothing more: ${rpcRequests(d)} ${d.state.plugSettings}")
+    expect(d.zigbee.switchCommands.isEmpty(), "the relay is not touched")
+}
+
 // --------------------------------------------------------------------------- summary
 
 println ""

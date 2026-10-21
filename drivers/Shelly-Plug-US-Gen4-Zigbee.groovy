@@ -18,8 +18,9 @@
  * Configure never switches the relay. These plugs run space heaters, and the hub's Generic Zigbee
  * Outlet tests the relay with an off/on cycle while configuring.
  *
- * Shelly's RPC channel over Zigbee (cluster 0xFC01) is used only to write optional settings (power
- * limit, power-on state, Bluetooth); readings never depend on it, because Hubitat cuts its replies short.
+ * Shelly's RPC channel over Zigbee (cluster 0xFC01) is used only to write optional settings (power, current
+ * and voltage limits, auto-off timer, power-on state, Bluetooth, Wi-Fi off); readings never depend on it,
+ * because Hubitat cuts its replies short.
  * Shelly's Wi-Fi setup cluster (0xFC02) gives the plug a network, which its firmware updates need.
  *
  * The attribute map and the parse structure follow the "Shelly 1PM Gen 4 Zigbee Driver" by joaomf and
@@ -69,13 +70,16 @@
  * 1.4.6  2026-10-15  Review of 1.4.5: a cycle whose only power report was parsed before its on report (or whose on
  *                    report was lost) starts from the newest reading of the current reporting period, so the trip
  *                    is still counted; a reply to another request also drops its length (WOR-801)
+ * 1.5.0  2026-10-20  Auto-off timer, current limit and voltage limit as plug settings (Switch.SetConfig), each limit
+ *                    guarded like the power limit; wifiOff command (WiFi.SetConfig); an off by the auto-off timer is
+ *                    logged, not counted as a trip (WOR-848)
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.4.6" }
+static String driverVersion() { "1.5.0" }
 
 metadata {
     definition(
@@ -113,6 +117,7 @@ metadata {
                                   description: "Bluetooth on the plug; the Shelly app needs it for Wi-Fi setup and firmware updates"]]
         command "setWifi", [[name: "network*", type: "STRING", description: "Wi-Fi network name (SSID)"],
                             [name: "password", type: "STRING", description: "Wi-Fi password, empty for an open network. Sent to the plug only; the driver does not log or store it"]]
+        command "wifiOff"
 
         // As the hub recorded them: joined on firmware 02000021 (no out clusters listed), and the
         // simple descriptor of firmware 2.0.1 (1490-1852-020001FF), which adds Shelly's cluster FC21.
@@ -138,6 +143,12 @@ metadata {
               defaultValue: "keep"
         input name: "powerLimitWatts", type: "number", title: "Switch off above (W)", range: "100..1800",
               description: "The plug switches itself OFF when the load draws more than this. Leave empty to keep the plug's own setting; 1800 W is its maximum."
+        input name: "autoOffSeconds", type: "number", title: "Switch off by itself after (s)", range: "0..86400",
+              description: "The plug switches itself OFF this many seconds after each switch-on, from the hub or the button. 0 turns the timer off; leave empty to keep the plug's own setting."
+        input name: "currentLimitAmps", type: "number", title: "Switch off above (A)", range: "1..15",
+              description: "The plug switches itself OFF when the load draws more than this. Leave empty to keep the plug's own setting; 15 A is its maximum."
+        input name: "voltageLimitVolts", type: "number", title: "Switch off above (V)", range: "100..300",
+              description: "The plug switches itself OFF when the mains voltage is above this. Leave empty to keep the plug's own setting."
         input name: "ledMode", type: "enum", title: "LED ring",
               options: ["keep": "Keep the plug's own setting", "power": "Colour follows the power draw", "switch": "One colour when on, another when off", "off": "Off"],
               defaultValue: "keep"
@@ -200,6 +211,9 @@ metadata {
 @Field static final Long TRIP_DROP_GRACE_MS = 15000L
 @Field static final Integer WATTS_HISTORY = 6                                   // recent power readings kept for that
 @Field static final Integer PLUG_MAX_WATTS = 1800
+@Field static final Integer PLUG_MAX_AMPS = 15
+@Field static final Integer AUTO_OFF_MAX_SECONDS = 86400
+@Field static final Long AUTO_OFF_GRACE_MS = 3000L                              // an off this close to the timer is the timer
 @Field static final Long RX_STAMP_EVERY_MS = 60000L
 @Field static final Long COMMAND_ECHO_MS = 10000L
 @Field static final Integer PING_GRACE_SECONDS = 60
@@ -231,6 +245,7 @@ metadata {
 // them one by one: never in state, which the device page shows and the hub stores.
 @Field static final java.util.concurrent.ConcurrentHashMap<String, List<String>> WIFI_FRAMES = new java.util.concurrent.ConcurrentHashMap<String, List<String>>()
 @Field static final Map RPC_INITIAL_STATE = ["off": "off", "on": "on", "previous": "restore_last"]   // "keep" is absent: never sent
+@Field static final List<String> SWITCH_CONFIG_KEYS = ["initial_state", "power_limit", "auto_off", "current_limit", "voltage_limit"]   // one write each, in this order
 @Field static final Map START_UP_ON_OFF = ["off": 0x00, "on": 0x01, "previous": 0xFF]
 
 // What the "Shelly 1PM Gen 4 Zigbee Driver" leaves on a device that is moved to this driver.
@@ -423,6 +438,14 @@ void applyPlugSettings() {
             return
         }
     }
+    for (String key in ["current_limit", "voltage_limit"]) {
+        if (todo[key] == null) continue
+        String blocker = key == "current_limit" ? currentLimitBlocker(todo[key] as Integer) : voltageLimitBlocker(todo[key] as Integer)
+        if (blocker) {
+            settingsOutcome(key, todo[key], "not sent", blocker)
+            return
+        }
+    }
     if (todo.initial_state != null && state.startUpOnOff == true && state.startUpWritable != false) {
         logInfo "setting the power-on state to ${todo.initial_state} (0006/4003)"
         state.startUpPending = [value: todo.initial_state, at: now()]
@@ -433,13 +456,19 @@ void applyPlugSettings() {
         runIn(RPC_TIMEOUT_SECONDS, "startUpTimeout")
         return
     }
-    if (todo.initial_state != null || todo.power_limit != null) {
-        String key = todo.initial_state != null ? "initial_state" : "power_limit"
-        def value = key == "initial_state" ? RPC_INITIAL_STATE[todo.initial_state] : todo.power_limit
-        sendRpc("Switch.SetConfig", [id: 0, config: [(key): value]], key, todo[key])
+    String key = SWITCH_CONFIG_KEYS.find { todo[it] != null }
+    if (key) {
+        sendRpc("Switch.SetConfig", [id: 0, config: switchConfig(key, todo[key])], key, todo[key])
         return
     }
     sendRpc("PLUGS_UI.SetConfig", [config: [leds: todo.led]], "led", todo.led)
+}
+
+/** The Switch.SetConfig fields for one plug setting; the auto-off timer is two of them. */
+private Map switchConfig(String key, value) {
+    if (key == "initial_state") return [initial_state: RPC_INITIAL_STATE[value]]
+    if (key == "auto_off") return (value as int) > 0 ? [auto_off: true, auto_off_delay: value] : [auto_off: false]
+    return [(key): value]
 }
 
 /**
@@ -458,6 +487,24 @@ void setBluetooth(String onOff) {
     // rpc.enable is the field current firmware honours (the top-level enable went with 2.0.0); both are sent either way.
     Map config = v == "on" ? [enable: true, rpc: [enable: true]] : [enable: false, rpc: [enable: false]]
     sendRpc("BLE.SetConfig", [config: config], "bluetooth", v)
+}
+
+/**
+ * Turns the plug's Wi-Fi station off through Shelly's RPC (WiFi.SetConfig), so a plug given Wi-Fi for a firmware
+ * update can drop it again from Hubitat; setWifi turns it back on. The relay is not touched.
+ */
+void wifiOff() {
+    dropStalePending()
+    if (state.rpcPending != null || state.startUpPending != null) {
+        settingsOutcome("wifi", "off", "not sent", "another write is in progress; try again in a minute", false)
+        return
+    }
+    if (wifiSetupActive()) {
+        settingsOutcome("wifi", "off", "not sent", "a Wi-Fi setup is still being sent; try again in a minute", false)
+        return
+    }
+    logInfo "turning Wi-Fi off"
+    sendRpc("WiFi.SetConfig", [config: [sta: [enable: false]]], "wifi", "off")
 }
 
 /** Why a cutoff must not go out right now, or null: the plug draws near or above it, or its draw is unknown or old. */
@@ -483,12 +530,39 @@ private BigDecimal acceptedPowerLimit() {
     return accepted != null ? toDecimal(accepted) : PLUG_MAX_WATTS
 }
 
+/** Why a current limit must not go out right now, or null: the plug draws near or above it, or its draw is unknown or old. */
+private String currentLimitBlocker(Integer limit) {
+    if (limit >= PLUG_MAX_AMPS) return null                                    // the maximum cannot undercut a load
+    Long lastMs = state.lastAmpsMs as Long
+    if (lastMs == null) return "the plug has not reported its current yet; refresh, then save again"
+    long age = now() - lastMs
+    if (age > powerReadingFreshMs()) return "the plug's last current reading is ${Math.round(age / 60000.0)} min old; refresh, then save again"
+    Long onAt = state.onAtMs as Long
+    if (device.currentValue("switch") == "on" && onAt != null && lastMs < onAt) return "no current reading since the plug was switched on; refresh, then save again"
+    BigDecimal drawing = toDecimal(state.lastAmps)                             // the plug's own amps, not the adjusted display
+    if (drawing >= limit * TRIP_LOAD_SHARE) return "the plug is drawing ${drawing} A and would switch itself off"
+    return null
+}
+
+/** Why a voltage limit must not go out right now, or null: the mains is at or above it, or its reading is unknown or old. */
+private String voltageLimitBlocker(Integer limit) {
+    Long lastMs = state.lastVoltsMs as Long
+    if (lastMs == null) return "the plug has not reported its voltage yet; refresh, then save again"
+    long age = now() - lastMs
+    if (age > powerReadingFreshMs()) return "the plug's last voltage reading is ${Math.round(age / 60000.0)} min old; refresh, then save again"
+    BigDecimal volts = toDecimal(state.lastVolts)                              // the plug's own volts, not the adjusted display
+    if (volts >= limit) return "the mains is at ${volts} V and the plug would switch itself off"
+    return null
+}
+
 /** Why a settings write must not go on (its next chunk, its retry), or null: the preference moved on, or the load forbids the cutoff now. */
 private String retryBlocker(Map pending) {
     String key = pending.key as String
-    if (key == "bluetooth") return null
+    if (key == "bluetooth" || key == "wifi") return null
     if (pendingPlugSettings()[key] != pending.value) return "the preference changed in the meantime"
     if (key == "power_limit") return powerLimitBlocker(pending.value as Integer)
+    if (key == "current_limit") return currentLimitBlocker(pending.value as Integer)
+    if (key == "voltage_limit") return voltageLimitBlocker(pending.value as Integer)
     return null
 }
 
@@ -499,6 +573,12 @@ private Map pendingPlugSettings() {
     if (onState && RPC_INITIAL_STATE[onState]) wanted.initial_state = onState
     BigDecimal limit = toDecimal(settings?.powerLimitWatts)
     if (limit > 0) wanted.power_limit = Math.max(POWER_LIMIT_MIN, Math.min(PLUG_MAX_WATTS, limit.intValue()))
+    def autoOff = settings?.autoOffSeconds
+    if (autoOff != null && autoOff.toString().trim()) wanted.auto_off = Math.max(0, Math.min(AUTO_OFF_MAX_SECONDS, toDecimal(autoOff).intValue()))   // 0 = timer off
+    BigDecimal amps = toDecimal(settings?.currentLimitAmps)
+    if (amps > 0) wanted.current_limit = Math.max(1, Math.min(PLUG_MAX_AMPS, amps.intValue()))
+    BigDecimal volts = toDecimal(settings?.voltageLimitVolts)
+    if (volts > 0) wanted.voltage_limit = volts.intValue()
     Map leds = ledSettings()
     if (leds) wanted.led = leds
     Map done = (state.plugSettings ?: [:]) as Map
@@ -573,12 +653,16 @@ private void startUpRefused(String detail) {
 
 /** Records one setting's outcome and moves on to the next pending setting, if any. */
 private void settingsOutcome(String key, value, String result, String detail, boolean skipOnFail = true) {
-    String what = key == "initial_state" ? "power-on state ${value}" : (key == "bluetooth" ? "Bluetooth ${value}" : (key == "led" ? "LED settings" : "power limit ${value} W"))
+    String what = settingLabel(key, value)
     String text = "${what}: ${result}${detail ? ' (' + detail + ')' : ''}"
     if (result == "accepted") {
         state.plugSettings = ((state.plugSettings ?: [:]) as Map) + [(key): value]
         if (key == "power_limit") state.cutoffWatts = value                 // outlives Configure: the plug keeps running it
         if (key == "bluetooth") sendEvent(name: "bluetooth", value: value)
+        if (key == "wifi") {                                                     // wifiStatus, wifiIp and wifiNetwork follow
+            state.wifiReadsLeft = WIFI_READS
+            runIn(10, "wifiRead")
+        }
         logInfo text
     } else {
         logWarn text
@@ -589,6 +673,20 @@ private void settingsOutcome(String key, value, String result, String detail, bo
     }
     sendEvent(name: "lastSettingsWrite", value: text)
     runIn(2, "applyPlugSettings")
+}
+
+/** How a plug setting is named in log lines and lastSettingsWrite. */
+private static String settingLabel(String key, value) {
+    switch (key) {
+        case "initial_state": return "power-on state ${value}"
+        case "bluetooth":     return "Bluetooth ${value}"
+        case "wifi":          return "Wi-Fi ${value}"
+        case "led":           return "LED settings"
+        case "auto_off":      return toDecimal(value) > 0 ? "auto-off after ${value} s" : "auto-off off"
+        case "current_limit": return "current limit ${value} A"
+        case "voltage_limit": return "voltage limit ${value} V"
+        default:              return "power limit ${value} W"
+    }
 }
 
 /**
@@ -677,7 +775,7 @@ void rpcTimeout() {
         sendRpc(pending.method as String, pending.params as Map, pending.key as String, pending.value, ((pending.attempt ?: 1) as int) + 1, pending.id as Integer)
         return
     }
-    String again = pending.key == "bluetooth" ? "run setBluetooth again" : "Save Preferences sends it again"
+    String again = pending.key == "bluetooth" ? "run setBluetooth again" : (pending.key == "wifi" ? "run wifiOff again" : "Save Preferences sends it again")
     rpcResult("unconfirmed", "no readable answer in ${RPC_ATTEMPTS} tries; ${again}")
 }
 
@@ -1153,6 +1251,11 @@ private void handleSwitch(String hex) {
  */
 private void checkTrip() {
     Long onAt = state.onAtMs as Long
+    int autoOff = toDecimal(((state.plugSettings ?: [:]) as Map).auto_off).intValue()
+    if (autoOff > 0 && onAt != null && now() - onAt >= autoOff * 1000L - AUTO_OFF_GRACE_MS) {
+        logInfo "switched itself off by its auto-off timer (${autoOff} s after it was switched on)"
+        return
+    }
     BigDecimal peak = toDecimal(state.peakWatts)
     BigDecimal limit = acceptedPowerLimit()
     boolean quick = onAt != null && now() - onAt <= TRIP_WINDOW_MS && (state.onType == "digital" || peak > 0)
@@ -1218,6 +1321,14 @@ private void handleMeasurement(String q, String hex, String encoding) {
         state.lastWattsMs = now()
         state.watts = [[plain, now()]] + ((state.watts ?: []) as List).take(WATTS_HISTORY - 1)
         if (device.currentValue("switch") == "on" && plain > toDecimal(state.peakWatts)) state.peakWatts = plain
+    }
+    if (q == "current") {                                                        // the current limit guard goes by these
+        state.lastAmps = plain
+        state.lastAmpsMs = now()
+    }
+    if (q == "voltage") {                                                        // the voltage limit guard goes by these
+        state.lastVolts = plain
+        state.lastVoltsMs = now()
     }
     sendEvent(name: d.event, value: value, unit: d.unit, descriptionText: text)
 }
