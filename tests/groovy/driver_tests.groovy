@@ -41,7 +41,7 @@ def driverClass = shell.parse(driverFile).getClass()
 
 /** A write response on FC01, status SUCCESS: both plugs sent one for every TxCtl and TxData write on 2026-10-15. */
 def rpcWriteAck = [raw: "catchall", profileId: "C001", clusterId: "FC01", clusterInt: 0xFC01, sourceEndpoint: "EF", destinationEndpoint: "01",
-                   options: "0040", messageType: "00", dni: "7257", isClusterSpecific: false, isManufacturerSpecific: true, manufacturerId: "1490",
+                   options: "0040", messageType: "00", dni: "1A2B", isClusterSpecific: false, isManufacturerSpecific: true, manufacturerId: "1490",
                    command: "04", direction: "01", data: ["00"]]
 
 /**
@@ -76,7 +76,7 @@ def deliver = { drv, Map descMap ->
 
 /** A decoded attribute frame (report "0A" or read response "01"), shaped like the hub's descMap. */
 def frame = { String cluster, String attrId, String encoding, String value, List extra = null, String command = "0A" ->
-    Map m = [raw: "test", dni: "7257", endpoint: "01", cluster: cluster, size: "0C", attrId: attrId, encoding: encoding,
+    Map m = [raw: "test", dni: "1A2B", endpoint: "01", cluster: cluster, size: "0C", attrId: attrId, encoding: encoding,
              command: command, value: value, clusterInt: Integer.parseInt(cluster, 16), attrInt: Integer.parseInt(attrId, 16)]
     if (extra) m.additionalAttrs = extra
     return m
@@ -86,7 +86,7 @@ def more = { String attrId, String encoding, String value ->
 }
 def catchall = { String cluster, String command, List data, String profile = "0104" ->
     [raw: "catchall", profileId: profile, clusterId: cluster, clusterInt: Integer.parseInt(cluster, 16), sourceEndpoint: "01",
-     destinationEndpoint: "01", options: "0040", messageType: "00", dni: "7257", isClusterSpecific: false,
+     destinationEndpoint: "01", options: "0040", messageType: "00", dni: "1A2B", isClusterSpecific: false,
      isManufacturerSpecific: false, manufacturerId: "0000", command: command, direction: "01", data: data]
 }
 def hex = { long v, int digits -> String.format("%0${digits}X", v) }
@@ -124,7 +124,7 @@ check("metadata: the capabilities, attributes and fingerprint the plug needs") {
     expect(md.attributes.healthStatus?.getAt(1) == ["online", "offline", "unknown"], "healthStatus enum: ${md.attributes}")
     expect(md.fingerprints.size() == 2 && md.fingerprints.every { it.model == "Plug US" && it.manufacturer == "Shelly" && it.endpointId == "01" },
            "fingerprints for manufacturer Shelly, model Plug US: ${md.fingerprints}")
-    // Device 4612's data on the hub (2026-10-12): inClusters 0000,0003,0004,0005,0006,0B04,0702 with no out clusters
+    // Plug B's data on the hub (2026-10-12): inClusters 0000,0003,0004,0005,0006,0B04,0702 with no out clusters
     // from its join on 02000021; after firmware 2.0.1 its simple descriptor read ...,0702,FC21 with out cluster 0019.
     expect(md.fingerprints.any { it.inClusters == "0000,0003,0004,0005,0006,0B04,0702" && it.outClusters == null }, "join-time clusters: ${md.fingerprints}")
     expect(md.fingerprints.any { it.inClusters == "0000,0003,0004,0005,0006,0B04,0702,FC21" && it.outClusters == "0019" }, "2.0.1 clusters: ${md.fingerprints}")
@@ -238,37 +238,38 @@ check("scaling: a zero or invalid divisor from the plug is ignored, the default 
 }
 
 // --------------------------------------------------------------------------- recorded frames
-// The descMaps below are copied from the hub's debug log of plug 4612 (firmware 2.0.1, firmwareMT
+// Two test plugs recorded the frames in this file: plug A (firmware 2.0.0, running a heater) and plug B (firmware 2.0.1).
+// The descMaps below are copied from the hub's debug log of plug B (firmware 2.0.1, firmwareMT
 // 1490-1852-020001FF) on 2026-10-12, as zigbee.parseDescriptionAsMap returned them to this driver.
 
-def REC_SCALE_0B04 = [raw: "281B010B0448000621010001060021640002060021010003060021E803040600210100050600210100", dni: "281B", endpoint: "01",
+def REC_SCALE_0B04 = [raw: "3C4D010B0448000621010001060021640002060021010003060021E803040600210100050600210100", dni: "3C4D", endpoint: "01",
     cluster: "0B04", size: "48", attrId: "0600", encoding: "21", command: "01", value: "0001", clusterInt: 2820, attrInt: 1536,
     additionalAttrs: [[value: "0064", encoding: "21", attrId: "0601", consumedBytes: 5, attrInt: 1537],
                       [value: "0001", encoding: "21", attrId: "0602", consumedBytes: 5, attrInt: 1538],
                       [value: "03E8", encoding: "21", attrId: "0603", consumedBytes: 5, attrInt: 1539],
                       [value: "0001", encoding: "21", attrId: "0604", consumedBytes: 5, attrInt: 1540],
                       [value: "0001", encoding: "21", attrId: "0605", consumedBytes: 5, attrInt: 1541]]]
-def REC_SCALE_FREQ = [raw: "281B010B04180004210100010400216400", dni: "281B", endpoint: "01", cluster: "0B04", size: "18", attrId: "0400",
+def REC_SCALE_FREQ = [raw: "3C4D010B04180004210100010400216400", dni: "3C4D", endpoint: "01", cluster: "0B04", size: "18", attrId: "0400",
     encoding: "21", command: "01", value: "0001", clusterInt: 2820, attrInt: 1024,
     additionalAttrs: [[value: "0064", encoding: "21", attrId: "0401", consumedBytes: 5, attrInt: 1025]]]
-def REC_SCALE_0702 = [raw: "281B0107022600033000010300220100000203002240420F", dni: "281B", endpoint: "01", cluster: "0702", size: "26",
+def REC_SCALE_0702 = [raw: "3C4D0107022600033000010300220100000203002240420F", dni: "3C4D", endpoint: "01", cluster: "0702", size: "26",
     attrId: "0300", encoding: "30", command: "01", value: "00", clusterInt: 1794, attrInt: 768,
     additionalAttrs: [[value: "000001", encoding: "22", attrId: "0301", consumedBytes: 6, attrInt: 769],
                       [value: "0F4240", encoding: "22", attrId: "0302", consumedBytes: 6, attrInt: 770]]]
-def REC_REFRESH_0B04 = [raw: "281B010B0430050521EF2E0805002100000B0500290000000300216F17", dni: "281B", endpoint: "01", cluster: "0B04",
+def REC_REFRESH_0B04 = [raw: "3C4D010B0430050521EF2E0805002100000B0500290000000300216F17", dni: "3C4D", endpoint: "01", cluster: "0B04",
     size: "30", attrId: "0505", encoding: "21", command: "01", value: "2EEF", clusterInt: 2820, attrInt: 1285,
     additionalAttrs: [[value: "0000", encoding: "21", attrId: "0508", consumedBytes: 5, attrInt: 1288],
                       [value: "0000", encoding: "29", attrId: "050B", consumedBytes: 5, attrInt: 1291],
                       [value: "176F", encoding: "21", attrId: "0300", consumedBytes: 5, attrInt: 768]]]
-def REC_ENERGY = [raw: "281B010702120000259859E0000000", dni: "281B", endpoint: "01", cluster: "0702", size: "12", attrId: "0000",
+def REC_ENERGY = [raw: "3C4D010702120000259859E0000000", dni: "3C4D", endpoint: "01", cluster: "0702", size: "12", attrId: "0000",
     encoding: "25", command: "0A", value: "000000E05998", clusterInt: 1794, attrInt: 0]
-def REC_BUILD = [raw: "281B0100001400404205322E302E31", dni: "281B", endpoint: "01", cluster: "0000", size: "14", attrId: "4000",
+def REC_BUILD = [raw: "3C4D0100001400404205322E302E31", dni: "3C4D", endpoint: "01", cluster: "0000", size: "14", attrId: "4000",
     encoding: "42", command: "01", value: "2.0.1", clusterInt: 0, attrInt: 16384]
-def REC_CR_OK = [raw: "catchall: 0104 0B04 01 01 0040 00 281B 00 00 0000 07 01 00", profileId: "0104", clusterId: "0B04", clusterInt: 2820,
-    sourceEndpoint: "01", destinationEndpoint: "01", options: "0040", messageType: "00", dni: "281B", isClusterSpecific: false,
+def REC_CR_OK = [raw: "catchall: 0104 0B04 01 01 0040 00 3C4D 00 00 0000 07 01 00", profileId: "0104", clusterId: "0B04", clusterInt: 2820,
+    sourceEndpoint: "01", destinationEndpoint: "01", options: "0040", messageType: "00", dni: "3C4D", isClusterSpecific: false,
     isManufacturerSpecific: false, manufacturerId: "0000", command: "07", direction: "01", data: ["00"]]
 
-check("recorded: 4612's configure answers give its units, and its readings scale with them") {
+check("recorded: plug B's configure answers give its units, and its readings scale with them") {
     def d = newDriver()
     d.configure()
     [REC_SCALE_0B04, REC_SCALE_FREQ, REC_SCALE_0702, REC_CR_OK, REC_BUILD].each { deliver(d, it) }
@@ -286,16 +287,16 @@ check("recorded: 4612's configure answers give its units, and its readings scale
     expect(d.zigbee.reportingFor(0x0B04, 0x0505).change == 100 && d.zigbee.reportingFor(0x0702, 0x0000).change == 10000, "${d.zigbee.reporting}")
 }
 
-check("recorded: 4613's bundled current+power report while its heater ran (the frozen-power frame)") {
-    // 2026-10-12 08:20:52 from plug 4613 (firmware 2.0.0, 020000FF) on this driver: raw 7257010B04140805213E190B0529A602
+check("recorded: plug A's bundled current+power report while its heater ran (the frozen-power frame)") {
+    // 2026-10-12 08:20:52 from plug A (firmware 2.0.0, 020000FF) on this driver: raw 1A2B010B04140805213E190B0529A602
     def d = newDriver()
     giveUnits(d, UNITS_020000FF)
-    deliver(d, [raw: "7257010B04140805213E190B0529A602", dni: "7257", endpoint: "01", cluster: "0B04", size: "14", attrId: "0508",
+    deliver(d, [raw: "1A2B010B04140805213E190B0529A602", dni: "1A2B", endpoint: "01", cluster: "0B04", size: "14", attrId: "0508",
                 encoding: "21", command: "0A", value: "193E", clusterInt: 2820, attrInt: 1288,
                 additionalAttrs: [[value: "02A6", encoding: "29", attrId: "050B", consumedBytes: 5, attrInt: 1291]]])
     expect(d.lastValue("amperage").toString() == "6.462" && d.lastValue("power").toString() == "678.0", "both from one frame: ${d.events}")
     // and a three-value frame with voltage: 08:20:11, 118.85 V x 9.987 A = 1187 VA against 1193 W
-    deliver(d, [raw: "7257010B041E0505216D2E08052103270B0529A904", dni: "7257", endpoint: "01", cluster: "0B04", size: "1E", attrId: "0505",
+    deliver(d, [raw: "1A2B010B041E0505216D2E08052103270B0529A904", dni: "1A2B", endpoint: "01", cluster: "0B04", size: "1E", attrId: "0505",
                 encoding: "21", command: "0A", value: "2E6D", clusterInt: 2820, attrInt: 1285,
                 additionalAttrs: [[value: "2703", encoding: "21", attrId: "0508", consumedBytes: 5, attrInt: 1288],
                                   [value: "04A9", encoding: "29", attrId: "050B", consumedBytes: 5, attrInt: 1291]]])
@@ -363,7 +364,7 @@ check("configure: reads units and software build; never switches the relay") {
     expect(reads.any { it.cluster == 0x0B04 && it.attrs.containsAll([0x0400, 0x0401]) }, "frequency scale read: ${reads}")
     expect(reads.any { it.cluster == 0x0702 && it.attrs.containsAll([0x0300, 0x0301, 0x0302]) }, "0702 unit, multiplier, divisor read: ${reads}")
     expect(reads.any { it.cluster == 0x0000 && it.attrs == [0x4000] }, "software build read: ${reads}")
-    expect(!cmds.any { it.startsWith("he raw") && !it.startsWith("he raw 0x7257 1 0xEF 0xFC02 ") }, "no raw frames but the Wi-Fi status read: ${cmds}")
+    expect(!cmds.any { it.startsWith("he raw") && !it.startsWith("he raw 0x1A2B 1 0xEF 0xFC02 ") }, "no raw frames but the Wi-Fi status read: ${cmds}")
     expect(d.zigbee.reporting.isEmpty(), "reporting waits for the units: ${d.zigbee.reporting}")
     expect(d.dueAt.applyReporting == d.clockMs + 8000, "applyReporting in 8 s: ${d.dueAt}")
     expect(d.periodic.healthCheck == 15, "health check every 15 minutes: ${d.periodic}")
@@ -385,7 +386,7 @@ check("configure then units: thresholds are converted to the plug's raw units") 
     Map sw = z.reportingFor(0x0006, 0x0000)
     expect(sw != null && sw.min == 0 && sw.max == 600 && sw.type == 0x10, "switch reported at once and every 600 s: ${sw}")
     List<String> sent = d.sentCommands()
-    expect(sent.any { it.startsWith("he cr") } && sent.any { it.startsWith("he rattr 0x7257 0x01 0x0006") }, "sent in one batch with a refresh: ${d.hubCommands}")
+    expect(sent.any { it.startsWith("he cr") } && sent.any { it.startsWith("he rattr 0x1A2B 0x01 0x0006") }, "sent in one batch with a refresh: ${d.hubCommands}")
     expect(d.zigbee.switchCommands.isEmpty(), "still no relay command")
 }
 
@@ -481,7 +482,7 @@ check("migration: a device with nothing to migrate is left alone and logs nothin
 check("switch: a report that follows on() is digital; one nobody asked for is physical") {
     def d = newDriver()
     List<String> cmd = d.on()
-    expect(cmd[0] == "he cmd 0x7257 0x01 0x0006 0x01 {}", "on() returns the on command: ${cmd}")
+    expect(cmd[0] == "he cmd 0x1A2B 0x01 0x0006 0x01 {}", "on() returns the on command: ${cmd}")
     d.advance(1500)
     deliver(d, frame("0006", "0000", "10", "01"))
     Map e = d.eventsNamed("switch").last()
@@ -510,7 +511,7 @@ check("switch: an unchanged heartbeat report is not logged again") {
 
 // --------------------------------------------------------------------------- health
 
-check("health: an idle plug that answers the ping is not marked offline (4612 under 1.0.0)") {
+check("health: an idle plug that answers the ping is not marked offline (plug B under 1.0.0)") {
     def d = newDriver()
     deliver(d, frame("0006", "0000", "10", "01"))
     expect(d.lastValue("healthStatus") == "online", "online after a message: ${d.events}")
@@ -519,7 +520,7 @@ check("health: an idle plug that answers the ping is not marked offline (4612 un
     expect(d.hubCommands.isEmpty() && d.dueAt.healthConfirm == null, "30 min: no ping yet: ${d.hubCommands}")
     d.advance(120_000)
     d.healthCheck()
-    expect(d.sentCommands().any { it.startsWith("he rattr 0x7257 0x01 0x0006 0x0000") }, "32 min: pinged: ${d.hubCommands}")
+    expect(d.sentCommands().any { it.startsWith("he rattr 0x1A2B 0x01 0x0006 0x0000") }, "32 min: pinged: ${d.hubCommands}")
     expect(d.lastValue("healthStatus") == "online" && d.dueAt.healthConfirm == d.clockMs + 60_000, "not offline yet, confirm in 60 s: ${d.events} ${d.dueAt}")
     d.advance(3_000)
     deliver(d, frame("0006", "0000", "10", "01", null, "01"))             // the ping's answer
@@ -538,7 +539,7 @@ check("health: a plug that stays silent through the ping goes offline once, and 
     expect(d.logsMatching("offline, no message for 33 minutes and no answer to a ping").size() == 1, "${d.logLines}")
     d.advance(900_000)
     d.healthCheck()
-    expect(d.sentCommands().count { it.startsWith("he rattr 0x7257 0x01 0x0006 0x0000") } == 2, "pinged again while offline: ${d.hubCommands}")
+    expect(d.sentCommands().count { it.startsWith("he rattr 0x1A2B 0x01 0x0006 0x0000") } == 2, "pinged again while offline: ${d.hubCommands}")
     d.advance(60_000)
     expect(d.eventsNamed("healthStatus").count { it.value == "offline" } == 1 && d.logsMatching("offline").size() == 1, "offline sent once: ${d.events}")
     deliver(d, frame("0B04", "0505", "21", hex(11960, 4)))
@@ -566,7 +567,7 @@ check("health: the receive stamp is written at most once a minute") {
 
 check("health: ping() reads the switch state") {
     def d = newDriver()
-    expect(d.ping()[0].startsWith("he rattr 0x7257 0x01 0x0006 0x0000"), "${d.ping()}")
+    expect(d.ping()[0].startsWith("he rattr 0x1A2B 0x01 0x0006 0x0000"), "${d.ping()}")
 }
 
 // --------------------------------------------------------------------------- catchall frames
@@ -608,7 +609,7 @@ check("catchall: a default response with an error status is logged") {
 
 check("zdo: bind responses and other ZDO frames are ignored quietly") {
     def d = newDriver()
-    // recorded on the hub from 4612, 2026-10-12: catchall: 0000 8021 00 00 0040 00 281B 00 00 0000 00 00 C500
+    // recorded on the hub from plug B, 2026-10-12: catchall: 0000 8021 00 00 0040 00 3C4D 00 00 0000 00 00 C500
     deliver(d, catchall("8021", "00", ["C5", "00"], "0000"))
     expect(d.events.findAll { it.name != "healthStatus" }.isEmpty() && d.logLines.findAll { it.startsWith("WARN") }.isEmpty(), "${d.events} ${d.logLines}")
 }
@@ -651,7 +652,7 @@ check("firmware: a build handed over as hex of its characters is decoded") {
 def rpcReply = { String text, int declaredLen ->
     List data = ["00", "00", "00", "42", String.format("%02X", declaredLen)] + text.getBytes("UTF-8").collect { String.format("%02X", it & 0xFF) }
     [raw: "catchall", profileId: "C001", clusterId: "FC01", clusterInt: 0xFC01, sourceEndpoint: "EF", destinationEndpoint: "01",
-     options: "0040", messageType: "00", dni: "7257", isClusterSpecific: false, isManufacturerSpecific: true, manufacturerId: "1490",
+     options: "0040", messageType: "00", dni: "1A2B", isClusterSpecific: false, isManufacturerSpecific: true, manufacturerId: "1490",
      command: "01", direction: "01", data: data]
 }
 def hexOfText = { String s -> s.getBytes("UTF-8").collect { String.format("%02X", it & 0xFF) }.join("") }
@@ -716,20 +717,20 @@ def rpcRequests = { drv ->
 def chunk = { drv, String text -> deliver(drv, rpcReply(text, text.getBytes("UTF-8").length)) }
 /** The reply length (RxCtl) as the plug answers it, little-endian uint32. */
 def rpcLength = { drv, int n -> deliver(drv, [raw: "catchall", profileId: "C001", clusterId: "FC01", clusterInt: 0xFC01, sourceEndpoint: "EF", destinationEndpoint: "01",
-    options: "0040", messageType: "00", dni: "7257", isClusterSpecific: false, isManufacturerSpecific: true, manufacturerId: "1490",
+    options: "0040", messageType: "00", dni: "1A2B", isClusterSpecific: false, isManufacturerSpecific: true, manufacturerId: "1490",
     command: "01", direction: "01", data: ["02", "00", "00", "23", String.format("%02X", n & 0xFF), String.format("%02X", (n >> 8) & 0xFF), "00", "00"]]) }
 
-check("recorded: 4612 (fw 2.0.1) answers the extras probe: light level yes, power-on state and power factor no") {
-    // 2026-10-15 09:34 from plug 4612 on this driver, as parseDescriptionAsMap returned them
+check("recorded: plug B (fw 2.0.1) answers the extras probe: light level yes, power-on state and power factor no") {
+    // 2026-10-15 09:34 from plug B on this driver, as parseDescriptionAsMap returned them
     def d = newDriver()
     d.configure()
     deliver(d, catchall("0003", "0B", ["00", "00"]))                                         // Identify accepted
-    deliver(d, [raw: "281B0100030C0000210900", dni: "281B", endpoint: "01", cluster: "0003", size: "0C", attrId: "0000",
+    deliver(d, [raw: "3C4D0100030C0000210900", dni: "3C4D", endpoint: "01", cluster: "0003", size: "0C", attrId: "0000",
                 encoding: "21", command: "01", value: "0009", clusterInt: 3, attrInt: 0])
     expect(d.logsMatching("identify: 9 s left").size() == 1, "${d.logLines}")
     deliver(d, catchall("0006", "01", ["03", "40", "86"]))
     deliver(d, catchall("0B04", "01", ["10", "05", "86"]))
-    deliver(d, [raw: "281B01FC212600002000010000220A000002000022320000", dni: "281B", endpoint: "01", cluster: "FC21", size: "26",
+    deliver(d, [raw: "3C4D01FC212600002000010000220A000002000022320000", dni: "3C4D", endpoint: "01", cluster: "FC21", size: "26",
                 attrId: "0000", encoding: "20", command: "01", value: "00", clusterInt: 64545, attrInt: 0,
                 additionalAttrs: [[value: "00000A", encoding: "22", attrId: "0001", consumedBytes: 6, attrInt: 1],
                                   [value: "000032", encoding: "22", attrId: "0002", consumedBytes: 6, attrInt: 2]]])
@@ -802,12 +803,12 @@ check("plug settings: the power limit goes out as RPC Switch.SetConfig in 40-byt
     d.advance(30_000)
     String json = '{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"power_limit":1500}}}'
     List<String> rpc = d.sentCommands().findAll { it.contains("0xFC01") }
-    expect(json.length() == 84 && rpc[0] == "he raw 0x7257 1 0xEF 0xFC01 {049014010201002354000000} {0xC001}", "TxCtl: 84 (0x54) as uint32 LE: ${rpc[0]}")
-    expect(rpc[1] == "he raw 0x7257 1 0xEF 0xFC01 {0490140202000042" + "28" + hexOfText(json.substring(0, 40)) + "} {0xC001}", "chunk 1, 40 bytes: ${rpc[1]}")
+    expect(json.length() == 84 && rpc[0] == "he raw 0x1A2B 1 0xEF 0xFC01 {049014010201002354000000} {0xC001}", "TxCtl: 84 (0x54) as uint32 LE: ${rpc[0]}")
+    expect(rpc[1] == "he raw 0x1A2B 1 0xEF 0xFC01 {0490140202000042" + "28" + hexOfText(json.substring(0, 40)) + "} {0xC001}", "chunk 1, 40 bytes: ${rpc[1]}")
     expect(rpc[2].contains("0490140302000042" + "28" + hexOfText(json.substring(40, 80))) && rpc[3].contains("0490140402000042" + "04" + hexOfText(json.substring(80))), "chunks 2 and 3: ${rpc}")
     expect(rpcRequests(d) == [json], "the chunks join into the request: ${rpcRequests(d)}")
     d.advance(2_000)
-    expect(d.hubCommands.last() == ["he raw 0x7257 1 0xEF 0xFC01 {0490140500" + "0200} {0xC001}", "delay 300", "he raw 0x7257 1 0xEF 0xFC01 {0490140600" + "0000} {0xC001}"],
+    expect(d.hubCommands.last() == ["he raw 0x1A2B 1 0xEF 0xFC01 {0490140500" + "0200} {0xC001}", "delay 300", "he raw 0x1A2B 1 0xEF 0xFC01 {0490140600" + "0000} {0xC001}"],
            "2 s later: read RxCtl (0002) then RxData (0000): ${d.hubCommands.last()}")
     expect(d.zigbee.switchCommands.isEmpty() && !d.sentCommands().any { it.contains("0x0006 0x0") && it.startsWith("he cmd") }, "the relay is not touched")
 }
@@ -835,13 +836,13 @@ check("plug settings: a reply judged across chunks and key orders") {
     expect(d.lastValue("lastSettingsWrite") == "power limit 1500 W: accepted", "a dst key before result: ${d.events}")
 }
 
-check("recorded: 4612 accepted power_limit 1800, its reply tail arriving before its cut-short opening") {
-    // 2026-10-15 09:36 from plug 4612 (fw 2.0.1): RxCtl 80; RxData 30 bytes of tail, then 46 of the 50-byte opening.
+check("recorded: plug B accepted power_limit 1800, its reply tail arriving before its cut-short opening") {
+    // 2026-10-15 09:36 from plug B (fw 2.0.1): RxCtl 80; RxData 30 bytes of tail, then 46 of the 50-byte opening.
     // The plug's own id in src is replaced by a made-up one of the same length.
     def d = newDriver(powerLimitWatts: 1800)
     d.updated(); d.advance(32_000)
     deliver(d, [raw: "catchall", profileId: "C001", clusterId: "FC01", clusterInt: 0xFC01, sourceEndpoint: "EF", destinationEndpoint: "01",
-                options: "0040", messageType: "00", dni: "281B", isClusterSpecific: false, isManufacturerSpecific: true, manufacturerId: "1490",
+                options: "0040", messageType: "00", dni: "3C4D", isClusterSpecific: false, isManufacturerSpecific: true, manufacturerId: "1490",
                 command: "01", direction: "01", data: ["02", "00", "00", "23", "50", "00", "00", "00"]])
     deliver(d, rpcReply('t":{"restart_required":false}}', 30))
     expect(d.state.rpcPending != null && d.lastValue("lastSettingsWrite") == null, "a tail alone is not judged: ${d.events}")
@@ -862,7 +863,7 @@ check("plug settings: one setting at a time; error, foreign id, default response
     d.advance(2_000)
     expect(rpcRequests(d)[1] == '{"id":2,"method":"Switch.SetConfig","params":{"id":0,"config":{"power_limit":1500}}}', "then the next setting: ${rpcRequests(d)}")
     deliver(d, [raw: "catchall", profileId: "C001", clusterId: "FC01", clusterInt: 0xFC01, sourceEndpoint: "EF", destinationEndpoint: "01",
-                options: "0040", messageType: "00", dni: "7257", isClusterSpecific: false, isManufacturerSpecific: true, manufacturerId: "1490",
+                options: "0040", messageType: "00", dni: "1A2B", isClusterSpecific: false, isManufacturerSpecific: true, manufacturerId: "1490",
                 command: "0B", direction: "01", data: ["02", "84"]])
     expect(d.lastValue("lastSettingsWrite") == "power limit 1500 W: refused (the plug answered unsupported manufacturer-specific command)", "${d.events}")
     d.advance(60_000)
@@ -929,7 +930,7 @@ check("bluetooth: off clears enable and rpc.enable; a refusal is reported; a wri
 }
 
 check("plug settings: a silent first try is asked once more under the same id, so either answer counts") {
-    // 2026-10-15: Bluetooth on to 4613 got no readable answer, the same request a minute later was accepted in 3 s.
+    // 2026-10-15: Bluetooth on to plug A got no readable answer, the same request a minute later was accepted in 3 s.
     def d = newDriver()
     d.setBluetooth("on")
     d.advance(25_000)
@@ -943,7 +944,7 @@ check("plug settings: a silent first try is asked once more under the same id, s
 }
 
 check("plug settings: each TxData chunk waits for the plug to acknowledge the write before it") {
-    // 2026-10-15 10:25: chunks sent 150 ms apart reached 4612 scrambled; it answered error -103 for "config".
+    // 2026-10-15 10:25: chunks sent 150 ms apart reached plug B scrambled; it answered error -103 for "config".
     def d = newDriver()
     d.onHubCommand = null
     d.setBluetooth("on")
@@ -977,8 +978,8 @@ check("plug settings: a stalled request (an acknowledgement lost) is asked again
     expect(d.state.rpcPending.id == 1 && d.state.rpcPending.attempt == 2 && d.state.rpcPending.sent == 0, "${d.state.rpcPending}")
 }
 
-check("recorded: 4612's error -103, its opening cut short at \"e, is refused, not left unjudged") {
-    // 2026-10-15 10:25 from plug 4612 (fw 2.0.1): RxCtl 112; RxData the opening cut to 50 bytes ending in ","e,
+check("recorded: plug B's error -103, its opening cut short at \"e, is refused, not left unjudged") {
+    // 2026-10-15 10:25 from plug B (fw 2.0.1): RxCtl 112; RxData the opening cut to 50 bytes ending in ","e,
     // then ":{"code":-103,"message":"Missing or bad argum. The plug's own id in src is replaced by a made-up one.
     def d = newDriver()
     d.setBluetooth("on")
@@ -998,7 +999,7 @@ check("recorded: 4612's error -103, its opening cut short at \"e, is refused, no
 /** A catchall on FC02, Shelly's Wi-Fi setup cluster, as the plugs send them from endpoint 0xEF. */
 def wifiFrame = { String command, List data ->
     [raw: "catchall", profileId: "C001", clusterId: "FC02", clusterInt: 0xFC02, sourceEndpoint: "EF", destinationEndpoint: "01",
-     options: "0040", messageType: "00", dni: "7257", isClusterSpecific: false, isManufacturerSpecific: true, manufacturerId: "1490",
+     options: "0040", messageType: "00", dni: "1A2B", isClusterSpecific: false, isManufacturerSpecific: true, manufacturerId: "1490",
      command: command, direction: "01", data: data]
 }
 def wifiAck = { String status = "00" -> wifiFrame("04", [status]) }
@@ -1020,7 +1021,7 @@ check("wifi: setWifi sends enable and the network, then the password, then Actio
     def d = newDriver()
     d.setWifi("Home Net", "correct horse 42")
     expect(wifiSent(d) == [["02", "0400" + "10" + "01" + "0500" + "42" + "08" + hexOfText("Home Net")]], "first write alone, no DHCP: ${wifiSent(d)}")
-    expect(d.sentCommands().every { !it.contains(" 0xFC02 ") || it.startsWith("he raw 0x7257 1 0xEF 0xFC02 {049014") && it.endsWith("} {0xC001}") }, "endpoint EF, Shelly's profile and manufacturer code")
+    expect(d.sentCommands().every { !it.contains(" 0xFC02 ") || it.startsWith("he raw 0x1A2B 1 0xEF 0xFC02 {049014") && it.endsWith("} {0xC001}") }, "endpoint EF, Shelly's profile and manufacturer code")
     d.advance(5_000)
     expect(wifiSent(d).size() == 1, "nothing more without an acknowledgement")
     deliver(d, wifiAck())
@@ -1068,8 +1069,8 @@ check("wifi: an open network sends no password; a bad name or password is not se
     expect(wifiSent(e).isEmpty() && e.state.wifiPending == null && e.eventsNamed("lastSettingsWrite").size() == 4, "nothing sent: ${wifiSent(e)}")
 }
 
-check("recorded: 4613 refused a DHCP write as read-only; a refusal names the attribute and ends the attempt") {
-    // 2026-10-15 11:24 from plug 4613 on 1.3.0, whose first write still carried DHCP (0x0003)
+check("recorded: plug A refused a DHCP write as read-only; a refusal names the attribute and ends the attempt") {
+    // 2026-10-15 11:24 from plug A on 1.3.0, whose first write still carried DHCP (0x0003)
     def d = newDriver()
     d.setWifi("Home Net", "correct horse 42")
     deliver(d, wifiFrame("04", ["88", "03", "00"]))
@@ -1114,8 +1115,8 @@ check("wifi: Status and IP are read back after Action 1 until the plug has an ad
     expect(wifiSent(e).count { it[0] == "00" } == 4 && e.dueAt.wifiRead == null, "gives up after 4 reads: ${wifiSent(e)}")
 }
 
-check("recorded: 4613 (fw 2.0.0) answers Status connecting, IP 0.0.0.0: no address yet, so the reads go on") {
-    // 2026-10-15 11:22 from plug 4613 on 1.3.0, as the driver decoded it; its SSID attribute was not read yet.
+check("recorded: plug A (fw 2.0.0) answers Status connecting, IP 0.0.0.0: no address yet, so the reads go on") {
+    // 2026-10-15 11:22 from plug A on 1.3.0, as the driver decoded it; its SSID attribute was not read yet.
     def d = newDriver()
     d.setWifi("Home Net", "")
     3.times { deliver(d, wifiAck()) }                                      // network, the empty password, Action 1
@@ -1152,8 +1153,8 @@ check("wifi: Configure and Refresh leave Action 0 and the reads to the driver, w
     expect(f.state.wifiSupported == null && f.dueAt.wifiRead != null, "Configure asks again: ${f.dueAt}")
 }
 
-check("recorded: 4612's 81-byte success to request id 14, its opening cut on the quote before result, is accepted (ids now stay below 10: a src one character longer stands in for the digit)") {
-    // 2026-10-15 14:02 from plug 4612 (fw 2.0.1): RxCtl 81; RxData 46 of the first 50 bytes, ending in ,"; then the
+check("recorded: plug B's 81-byte success to request id 14, its opening cut on the quote before result, is accepted (ids now stay below 10: a src one character longer stands in for the digit)") {
+    // 2026-10-15 14:02 from plug B (fw 2.0.1): RxCtl 81; RxData 46 of the first 50 bytes, ending in ,"; then the
     // 31-byte tail lt":{"restart_required":false}}. One more digit in the id than on 2026-10-15 09:36 moves the cut
     // one character earlier, from the r of result onto the quote. The plug's own id in src is replaced by a made-up one.
     def d = newDriver(powerLimitWatts: 1800)
@@ -1174,7 +1175,7 @@ check("recorded: 4612's 81-byte success to request id 14, its opening cut on the
 }
 
 check("trip: three button presses (on, off 0.8 s later, on) at 0 W are not a trip; a physical on under load still is") {
-    // 2026-10-15 11:04 from plug 4612: on [physical], off [physical] 0.85 s later, on [physical] 0.56 s later, nothing plugged in.
+    // 2026-10-15 11:04 from plug B: on [physical], off [physical] 0.85 s later, on [physical] 0.56 s later, nothing plugged in.
     def d = newDriver()
     giveUnits(d, UNITS_020000FF)
     deliver(d, frame("0006", "0000", "10", "01"))
@@ -1509,7 +1510,7 @@ check("plug settings: the RPC id wraps from 9 to 1; Configure forgets what the p
     expect(d.state.plugSettings == null && d.state.startUpOnOff == null && d.state.cutoffWatts == 1500, "sent again, judged against 1500 W meanwhile: ${d.state}")
 }
 
-check("trip: 4613's sequence of 2026-10-13 19:10 (on, 1986 W, off 2 s later by the plug) counts as a trip") {
+check("trip: plug A's sequence of 2026-10-13 19:10 (on, 1986 W, off 2 s later by the plug) counts as a trip") {
     def d = newDriver()
     giveUnits(d, UNITS_020000FF)
     d.on()
@@ -1994,7 +1995,7 @@ check("trip: an off when the auto-off timer the driver set is due is logged as t
     expect(d.logsMatching("WARN Test Plug: switched itself off").size() == 1 && d.lastValue("tripCount") == 1, "an off 2 s after the on under 1986 W is a trip: ${d.logLines}")
 }
 
-check("wifiOff: sends WiFi.SetConfig with the station disabled, waits for another write, reads the Wi-Fi state back when accepted, names itself when unconfirmed") {
+check("wifiOff: sends WiFi.SetConfig with the station disabled, waits for another write, reads the Wi-Fi state back when accepted or unconfirmed") {
     def d = newDriver()
     d.wifiOff()
     expect(rpcRequests(d) == ['{"id":1,"method":"WiFi.SetConfig","params":{"config":{"sta":{"enable":false}}}}'], "${rpcRequests(d)}")
@@ -2010,7 +2011,7 @@ check("wifiOff: sends WiFi.SetConfig with the station disabled, waits for anothe
     t.wifiOff()
     t.advance(50_000)
     expect(t.lastValue("lastSettingsWrite") == "Wi-Fi off: unconfirmed (no readable answer in 2 tries; run wifiOff again)", "${t.events}")
-    expect(t.state.settingsSkip == null && t.dueAt.wifiRead == null, "${t.state} ${t.dueAt}")
+    expect(t.state.settingsSkip == null && t.state.wifiReadsLeft == 4 && t.dueAt.wifiRead == t.clockMs + 10_000, "read back after an unconfirmed wifiOff too, the plug may have run it: ${t.state} ${t.dueAt}")
     def w = newDriver()
     w.setWifi("Home Net", "correct horse 42")
     w.wifiOff()
@@ -2047,13 +2048,13 @@ check("plug settings: a current limit is held back under a load near it or witho
     [d, n, s, c].each { expect(it.zigbee.switchCommands.isEmpty(), "the relay is not touched") }
 }
 
-check("plug settings: a voltage limit is held back while the mains is above it, without a reading or with a stale one, and sent otherwise") {
+check("plug settings: a voltage limit is held back while the mains is within 5% of it, without a reading or with a stale one, sent otherwise, and clamped to 100 to 300 V") {
     def d = newDriver(voltageLimitVolts: 110)
     giveUnits(d, UNITS_020000FF)
     deliver(d, frame("0B04", "0505", "21", hex(11440, 4)))
     d.updated()
     d.advance(30_000)
-    expect(rpcRequests(d).isEmpty() && d.lastValue("lastSettingsWrite") == "voltage limit 110 V: not sent (the mains is at 114.4 V and the plug would switch itself off)", "${d.events}")
+    expect(rpcRequests(d).isEmpty() && d.lastValue("lastSettingsWrite") == "voltage limit 110 V: not sent (the mains is at 114.4 V and the plug would switch itself off at 110 V)", "${d.events}")
     def n = newDriver(voltageLimitVolts: 130)
     n.updated()
     n.advance(30_000)
@@ -2074,7 +2075,25 @@ check("plug settings: a voltage limit is held back while the mains is above it, 
     s.advance(2_000)
     chunk(s, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
     expect(s.lastValue("lastSettingsWrite") == "voltage limit 130 V: accepted" && s.state.plugSettings.voltage_limit == 130, "${s.events} ${s.state.plugSettings}")
-    [d, n, o, s].each { expect(it.zigbee.switchCommands.isEmpty(), "the relay is not touched") }
+    def m = newDriver(voltageLimitVolts: 118)
+    giveUnits(m, UNITS_020000FF)
+    deliver(m, frame("0B04", "0505", "21", hex(11440, 4)))
+    m.updated()
+    m.advance(30_000)
+    expect(rpcRequests(m).isEmpty() && m.lastValue("lastSettingsWrite") == "voltage limit 118 V: not sent (the mains is at 114.4 V and the plug would switch itself off at 118 V)", "within 5% of the mains: ${m.events}")
+    def c = newDriver(voltageLimitVolts: 500)
+    giveUnits(c, UNITS_020000FF)
+    deliver(c, frame("0B04", "0505", "21", hex(11440, 4)))
+    c.updated()
+    c.advance(30_000)
+    expect(rpcRequests(c) == ['{"id":1,"method":"Switch.SetConfig","params":{"id":0,"config":{"voltage_limit":300}}}'], "clamped to 300 V: ${rpcRequests(c)}")
+    def l = newDriver(voltageLimitVolts: 50)
+    giveUnits(l, UNITS_020000FF)
+    deliver(l, frame("0B04", "0505", "21", hex(11440, 4)))
+    l.updated()
+    l.advance(30_000)
+    expect(rpcRequests(l).isEmpty() && l.lastValue("lastSettingsWrite") == "voltage limit 100 V: not sent (the mains is at 114.4 V and the plug would switch itself off at 100 V)", "clamped to 100 V, then held back: ${l.events}")
+    [d, n, o, s, m, c, l].each { expect(it.zigbee.switchCommands.isEmpty(), "the relay is not touched") }
 }
 
 check("plug settings: the Switch.SetConfig fields go out one write at a time, power limit first, then auto-off, then the current limit") {
@@ -2097,6 +2116,173 @@ check("plug settings: the Switch.SetConfig fields go out one write at a time, po
     d.advance(60_000)
     expect(rpcRequests(d).size() == 3 && d.state.plugSettings == [power_limit: 1200, auto_off: 600, current_limit: 10], "nothing more: ${rpcRequests(d)} ${d.state.plugSettings}")
     expect(d.zigbee.switchCommands.isEmpty(), "the relay is not touched")
+}
+
+check("trip: the auto-off timer is judged from the latest switch-on and the delay in force then, within a window; the marker survives Configure") {
+    def timerOn = { int seconds, int id ->
+        def x = newDriver(autoOffSeconds: seconds)
+        giveUnits(x, UNITS_020000FF)
+        x.updated()
+        x.advance(30_000)
+        x.advance(2_000)
+        chunk(x, '{"id":' + id + ',"src":"shellyplugusg4-aabbcc000001","r')
+        expect(x.state.plugSettings.auto_off == seconds, "positive control: the timer was accepted: ${x.state.plugSettings}")
+        x.on()
+        x.advance(500)
+        deliver(x, frame("0006", "0000", "10", "01"))
+        return x
+    }
+    String timer600 = "INFO Test Plug: switched itself off by its auto-off timer (600 s after it was switched on)"
+    // a repeated on restarts the plug's timer: an off 2 s after it is a trip, 600 s after the first on or not
+    def d = timerOn(600, 1)
+    d.advance(598_000)
+    d.on()
+    d.advance(500)
+    deliver(d, frame("0B04", "050B", "29", hex(1986, 4)))
+    d.advance(1_500)
+    deliver(d, frame("0006", "0000", "10", "00"))
+    expect(d.logsMatching(timer600).isEmpty(), "not the timer: ${d.logLines}")
+    expect(d.logsMatching("WARN Test Plug: switched itself off under load, at up to 1986 W (limit 1800 W)").size() == 1 && d.lastValue("tripCount") == 1, "${d.logLines}")
+    // an off 600 s after a repeated on is the timer, 900 s after the first on
+    def e = timerOn(600, 1)
+    e.advance(300_000)
+    e.on()
+    e.advance(500)
+    deliver(e, frame("0B04", "050B", "29", hex(1986, 4)))
+    e.advance(599_500)
+    deliver(e, frame("0006", "0000", "10", "00"))
+    expect(e.logsMatching(timer600).size() == 1 && e.logsMatching("WARN Test Plug: switched itself off").isEmpty(), "${e.logLines}")
+    // an off long after the timer was due is not the timer: the timer had fired already, or was not running
+    def f = timerOn(600, 1)
+    f.advance(699_000)
+    deliver(f, frame("0B04", "050B", "29", hex(1986, 4)))
+    f.advance(500)
+    deliver(f, frame("0006", "0000", "10", "00"))
+    expect(f.logsMatching(timer600).isEmpty() && f.lastValue("tripCount") == 1, "700 s after the on: ${f.logLines}")
+    // the delay in force at the on counts: 60 s accepted while the plug runs on 600 s does not make an off at 61 s the timer
+    def g = timerOn(600, 1)
+    g.settings.autoOffSeconds = 60
+    g.updated()
+    g.advance(30_000)
+    expect(rpcRequests(g).size() == 2 && rpcRequests(g)[1].contains('"auto_off_delay":60'), "${rpcRequests(g)}")
+    g.advance(2_000)
+    chunk(g, '{"id":2,"src":"shellyplugusg4-aabbcc000001","r')
+    expect(g.state.plugSettings.auto_off == 60 && g.state.timerSeconds == 600, "${g.state.plugSettings} ${g.state.timerSeconds}")
+    g.advance(28_000)
+    deliver(g, frame("0B04", "050B", "29", hex(1986, 4)))
+    g.advance(500)
+    deliver(g, frame("0006", "0000", "10", "00"))
+    expect(g.logsMatching("INFO Test Plug: switched itself off by its auto-off timer").isEmpty() && g.lastValue("tripCount") == 1, "61 s after the on: ${g.logLines}")
+    g.on()
+    g.advance(500)
+    deliver(g, frame("0006", "0000", "10", "01"))
+    g.advance(59_500)
+    deliver(g, frame("0006", "0000", "10", "00"))
+    expect(g.logsMatching("INFO Test Plug: switched itself off by its auto-off timer (60 s after it was switched on)").size() == 1 && g.lastValue("tripCount") == 1, "the new delay from the next on: ${g.logLines}")
+    // Configure forgets the plug's settings, not the delay it confirmed: the running timer and the next one are still judged
+    def h = timerOn(600, 1)
+    h.advance(100_000)
+    h.configure()
+    expect(h.state.autoOffSeconds == 600 && !(h.state.plugSettings?.auto_off), "kept beside the settings: ${h.state}")
+    h.advance(499_500)
+    deliver(h, frame("0006", "0000", "10", "00"))
+    expect(h.logsMatching(timer600).size() == 1, "${h.logLines}")
+    h.on()
+    expect(h.state.timerSeconds == 600, "the next cycle still knows the delay: ${h.state.timerSeconds}")
+    [d, e, f, g, h].each { expect(it.zigbee.switchCommands.every { it == "on" }, "only the test's own on commands: ${it.zigbee.switchCommands}") }
+}
+
+check("trip: an off while the plug carried at least 90% of the current limit it confirmed is an overcurrent trip; the limit survives Configure") {
+    def limited = {
+        def x = newDriver(currentLimitAmps: 10)
+        giveUnits(x, UNITS_020000FF)
+        deliver(x, frame("0B04", "0508", "21", hex(2000, 4)))
+        x.updated()
+        x.advance(30_000)
+        x.advance(2_000)
+        chunk(x, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+        expect(x.state.plugSettings.current_limit == 10, "positive control: the limit was accepted: ${x.state.plugSettings}")
+        return x
+    }
+    def cycle = { x, int mA, int w ->
+        x.on()
+        x.advance(500)
+        deliver(x, frame("0006", "0000", "10", "01"))
+        x.advance(20_000)
+        deliver(x, frame("0B04", "0508", "21", hex(mA, 4), [more("050B", "29", hex(w, 4))]))
+        x.advance(1_000)
+        deliver(x, frame("0B04", "0508", "21", hex(0, 4), [more("050B", "29", hex(0, 4))]))   // the load is cut before the off report
+        x.advance(500)
+        deliver(x, frame("0006", "0000", "10", "00"))
+    }
+    String text = "switched itself off under load, at up to 9.5 A (limit 10 A): likely its overcurrent protection"
+    def d = limited()
+    cycle(d, 9500, 1100)
+    expect(d.logsMatching("WARN Test Plug: " + text).size() == 1 && d.lastValue("tripCount") == 1 && d.lastValue("lastTrip") == text, "${d.logLines} ${d.events}")
+    d.configure()
+    expect(d.state.cutoffAmps == 10, "kept beside the settings: ${d.state}")
+    cycle(d, 9500, 1100)
+    expect(d.lastValue("tripCount") == 2, "judged against the kept limit after Configure: ${d.logLines}")
+    def e = limited()
+    cycle(e, 5000, 600)
+    expect(e.logsMatching("WARN Test Plug: switched itself off").isEmpty() && e.lastValue("tripCount") == null, "5 A under a 10 A limit is no trip: ${e.logLines}")
+    def n = newDriver()
+    giveUnits(n, UNITS_020000FF)
+    cycle(n, 9500, 1100)
+    expect(n.logsMatching("WARN Test Plug: switched itself off").isEmpty(), "9.5 A without a limit (15 A) is no trip: ${n.logLines}")
+}
+
+check("trip: an off while the mains was within 2% of the voltage limit the plug confirmed is an overvoltage trip; not without a limit or with a stale reading; the limit survives Configure") {
+    def limited = {
+        def x = newDriver(voltageLimitVolts: 130)
+        giveUnits(x, UNITS_020000FF)
+        deliver(x, frame("0B04", "0505", "21", hex(11440, 4)))
+        x.updated()
+        x.advance(30_000)
+        x.advance(2_000)
+        chunk(x, '{"id":1,"src":"shellyplugusg4-aabbcc000001","r')
+        expect(x.state.plugSettings.voltage_limit == 130, "positive control: the limit was accepted: ${x.state.plugSettings}")
+        return x
+    }
+    def cycle = { x, int cV, long gapMs ->
+        x.on()
+        x.advance(500)
+        deliver(x, frame("0006", "0000", "10", "01"))
+        x.advance(20_000)
+        deliver(x, frame("0B04", "0505", "21", hex(cV, 4)))
+        x.advance(gapMs)
+        deliver(x, frame("0006", "0000", "10", "00"))
+    }
+    String text = "switched itself off at 128.0 V on the mains (limit 130 V): likely its overvoltage protection"
+    def d = limited()
+    cycle(d, 12800, 1_000)
+    expect(d.logsMatching("WARN Test Plug: " + text).size() == 1 && d.lastValue("tripCount") == 1 && d.lastValue("lastTrip") == text, "${d.logLines} ${d.events}")
+    d.configure()
+    expect(d.state.cutoffVolts == 130, "kept beside the settings: ${d.state}")
+    cycle(d, 12800, 1_000)
+    expect(d.lastValue("tripCount") == 2, "judged against the kept limit after Configure: ${d.logLines}")
+    def e = limited()
+    cycle(e, 12000, 1_000)
+    expect(e.logsMatching("WARN Test Plug: switched itself off").isEmpty(), "120 V under a 130 V limit is no trip: ${e.logLines}")
+    def s = limited()
+    cycle(s, 12800, 1_770_000)
+    expect(s.logsMatching("WARN Test Plug: switched itself off").isEmpty(), "a 30 min old reading does not count: ${s.logLines}")
+    def n = newDriver()
+    giveUnits(n, UNITS_020000FF)
+    cycle(n, 12800, 1_000)
+    expect(n.logsMatching("WARN Test Plug: switched itself off").isEmpty(), "no limit, no overvoltage trip: ${n.logLines}")
+}
+
+check("wifiOff: refused while a setWifi setup is staged for a quiet channel, not only while it is being sent") {
+    def q = newDriver()
+    q.refresh()
+    q.advance(1_000)
+    expect(q.state.wifiBusyMs == q.clockMs, "positive control: the Wi-Fi read just went out: ${q.state}")
+    q.setWifi("Home Net", "correct horse 42")
+    expect(q.state.wifiPending != null && q.state.wifiPending.sent == 0 && q.dueAt.wifiStart != null, "staged, not sent: ${q.state.wifiPending} ${q.dueAt}")
+    q.wifiOff()
+    expect(rpcRequests(q).isEmpty() && q.lastValue("lastSettingsWrite") == "Wi-Fi off: not sent (a Wi-Fi setup is still being sent; try again in a minute)", "${q.events}")
+    expect(q.zigbee.switchCommands.isEmpty(), "the relay is not touched")
 }
 
 // --------------------------------------------------------------------------- summary

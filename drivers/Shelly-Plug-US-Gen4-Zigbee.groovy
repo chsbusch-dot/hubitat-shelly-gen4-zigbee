@@ -73,13 +73,20 @@
  * 1.5.0  2026-10-20  Auto-off timer, current limit and voltage limit as plug settings (Switch.SetConfig), each limit
  *                    guarded like the power limit; wifiOff command (WiFi.SetConfig); an off by the auto-off timer is
  *                    logged, not counted as a trip (WOR-848)
+ * 1.5.1  2026-10-21  Review of 1.5.0: an off by the auto-off timer is judged from the latest switch-on and the delay
+ *                    in force then, within a window, so an off seconds after a re-sent on or long after the timer
+ *                    was due counts as a trip; the auto-off delay, current limit and voltage limit outlive Configure
+ *                    like the power limit, and a trip is judged against the current and voltage limits too; a
+ *                    voltage limit within 5 % of the mains is held back, and one outside 100 to 300 V is clamped;
+ *                    wifiOff waits for a staged Wi-Fi setup; the Wi-Fi state is read back after a refused or
+ *                    unconfirmed wifiOff as well (WOR-851)
  */
 
 import groovy.json.JsonOutput
 import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 
-static String driverVersion() { "1.5.0" }
+static String driverVersion() { "1.5.1" }
 
 metadata {
     definition(
@@ -205,6 +212,7 @@ metadata {
 // An off the hub did not send, this soon after an on or at this share of the power limit, is a trip.
 @Field static final Long TRIP_WINDOW_MS = 10000L
 @Field static final BigDecimal TRIP_LOAD_SHARE = 0.9
+@Field static final BigDecimal TRIP_VOLTS_SHARE = 0.98                            // a mains reading this close to the voltage limit is an overvoltage trip
 // A reading this far below the load before it is a drop. A drop within the grace time of an off is the plug
 // cutting its load (a protection trip reports 0 W, once or more, right before off), so the load before it counts.
 @Field static final BigDecimal TRIP_PEAK_DECAY = 0.5
@@ -212,6 +220,9 @@ metadata {
 @Field static final Integer WATTS_HISTORY = 6                                   // recent power readings kept for that
 @Field static final Integer PLUG_MAX_WATTS = 1800
 @Field static final Integer PLUG_MAX_AMPS = 15
+@Field static final Integer VOLTAGE_LIMIT_MIN = 100                              // the plug's voltage limit range
+@Field static final Integer VOLTAGE_LIMIT_MAX = 300
+@Field static final BigDecimal VOLTAGE_LIMIT_MARGIN = 1.05                       // a limit under the mains plus 5 % would trip on a normal swing
 @Field static final Integer AUTO_OFF_MAX_SECONDS = 86400
 @Field static final Long AUTO_OFF_GRACE_MS = 3000L                              // an off this close to the timer is the timer
 @Field static final Long RX_STAMP_EVERY_MS = 60000L
@@ -246,6 +257,9 @@ metadata {
 @Field static final java.util.concurrent.ConcurrentHashMap<String, List<String>> WIFI_FRAMES = new java.util.concurrent.ConcurrentHashMap<String, List<String>>()
 @Field static final Map RPC_INITIAL_STATE = ["off": "off", "on": "on", "previous": "restore_last"]   // "keep" is absent: never sent
 @Field static final List<String> SWITCH_CONFIG_KEYS = ["initial_state", "power_limit", "auto_off", "current_limit", "voltage_limit"]   // one write each, in this order
+// Settings the plug keeps running whatever the driver forgets: Configure clears plugSettings so that they are sent
+// again, but these stay under their own state keys, so trips and the auto-off timer are still judged against them.
+@Field static final Map CUTOFF_KEYS = [power_limit: "cutoffWatts", auto_off: "autoOffSeconds", current_limit: "cutoffAmps", voltage_limit: "cutoffVolts"]
 @Field static final Map START_UP_ON_OFF = ["off": 0x00, "on": 0x01, "previous": 0xFF]
 
 // What the "Shelly 1PM Gen 4 Zigbee Driver" leaves on a device that is moved to this driver.
@@ -313,6 +327,7 @@ List<String> refresh() {
 List<String> on() {
     logDebug "on()"
     state.pendingSwitch = [value: "on", at: now()]
+    markTimerStart()                                                            // the plug restarts its auto-off timer on every on
     return zigbee.on()
 }
 
@@ -499,7 +514,7 @@ void wifiOff() {
         settingsOutcome("wifi", "off", "not sent", "another write is in progress; try again in a minute", false)
         return
     }
-    if (wifiSetupActive()) {
+    if (state.wifiPending != null) {                                           // staged for a quiet channel, or being sent
         settingsOutcome("wifi", "off", "not sent", "a Wi-Fi setup is still being sent; try again in a minute", false)
         return
     }
@@ -522,12 +537,32 @@ private String powerLimitBlocker(Integer limit) {
 }
 
 /**
- * The cutoff the plug confirmed, or its maximum; a preference it refused or has not received yet does not count.
- * Configure forgets the settings so that they are sent again, but not the cutoff: the plug still runs it.
+ * The value the plug confirmed for a setting it keeps running (a cutoff, the auto-off delay), or null; a preference
+ * it refused or has not received yet does not count. Configure forgets the settings so that they are sent again,
+ * but not these: the plug still runs them (CUTOFF_KEYS).
  */
+private def confirmedSetting(String key) {
+    def accepted = ((state.plugSettings ?: [:]) as Map)[key]
+    String kept = CUTOFF_KEYS[key] as String
+    return accepted != null ? accepted : (kept ? state[kept] : null)
+}
+
+/** The power cutoff the plug confirmed, or its maximum. */
 private BigDecimal acceptedPowerLimit() {
-    def accepted = ((state.plugSettings ?: [:]) as Map).power_limit ?: state.cutoffWatts
+    def accepted = confirmedSetting("power_limit")
     return accepted != null ? toDecimal(accepted) : PLUG_MAX_WATTS
+}
+
+/** The current limit the plug confirmed, or its maximum. */
+private BigDecimal acceptedCurrentLimit() {
+    def accepted = confirmedSetting("current_limit")
+    return accepted != null ? toDecimal(accepted) : PLUG_MAX_AMPS
+}
+
+/** The voltage limit the plug confirmed, or null: without one there is no overvoltage trip to judge. */
+private BigDecimal acceptedVoltageLimit() {
+    def accepted = confirmedSetting("voltage_limit")
+    return accepted != null ? toDecimal(accepted) : null
 }
 
 /** Why a current limit must not go out right now, or null: the plug draws near or above it, or its draw is unknown or old. */
@@ -544,14 +579,14 @@ private String currentLimitBlocker(Integer limit) {
     return null
 }
 
-/** Why a voltage limit must not go out right now, or null: the mains is at or above it, or its reading is unknown or old. */
+/** Why a voltage limit must not go out right now, or null: the mains is within 5 % of it or above, or its reading is unknown or old. */
 private String voltageLimitBlocker(Integer limit) {
     Long lastMs = state.lastVoltsMs as Long
     if (lastMs == null) return "the plug has not reported its voltage yet; refresh, then save again"
     long age = now() - lastMs
     if (age > powerReadingFreshMs()) return "the plug's last voltage reading is ${Math.round(age / 60000.0)} min old; refresh, then save again"
     BigDecimal volts = toDecimal(state.lastVolts)                              // the plug's own volts, not the adjusted display
-    if (volts >= limit) return "the mains is at ${volts} V and the plug would switch itself off"
+    if (volts * VOLTAGE_LIMIT_MARGIN >= limit) return "the mains is at ${volts} V and the plug would switch itself off at ${limit} V"
     return null
 }
 
@@ -578,7 +613,7 @@ private Map pendingPlugSettings() {
     BigDecimal amps = toDecimal(settings?.currentLimitAmps)
     if (amps > 0) wanted.current_limit = Math.max(1, Math.min(PLUG_MAX_AMPS, amps.intValue()))
     BigDecimal volts = toDecimal(settings?.voltageLimitVolts)
-    if (volts > 0) wanted.voltage_limit = volts.intValue()
+    if (volts > 0) wanted.voltage_limit = Math.max(VOLTAGE_LIMIT_MIN, Math.min(VOLTAGE_LIMIT_MAX, volts.intValue()))
     Map leds = ledSettings()
     if (leds) wanted.led = leds
     Map done = (state.plugSettings ?: [:]) as Map
@@ -657,12 +692,8 @@ private void settingsOutcome(String key, value, String result, String detail, bo
     String text = "${what}: ${result}${detail ? ' (' + detail + ')' : ''}"
     if (result == "accepted") {
         state.plugSettings = ((state.plugSettings ?: [:]) as Map) + [(key): value]
-        if (key == "power_limit") state.cutoffWatts = value                 // outlives Configure: the plug keeps running it
+        if (CUTOFF_KEYS[key]) state[CUTOFF_KEYS[key] as String] = value     // outlives Configure: the plug keeps running it
         if (key == "bluetooth") sendEvent(name: "bluetooth", value: value)
-        if (key == "wifi") {                                                     // wifiStatus, wifiIp and wifiNetwork follow
-            state.wifiReadsLeft = WIFI_READS
-            runIn(10, "wifiRead")
-        }
         logInfo text
     } else {
         logWarn text
@@ -670,6 +701,10 @@ private void settingsOutcome(String key, value, String result, String detail, bo
         // saved while the old write was still out must not inherit its failure.
         List skip = (state.settingsSkip ?: []) as List
         if (skipOnFail && pendingPlugSettings()[key] == value) state.settingsSkip = skip + [key]
+    }
+    if (key == "wifi" && result != "not sent") {                                // wifiStatus, wifiIp and wifiNetwork follow: what the plug runs now, whatever it answered
+        state.wifiReadsLeft = WIFI_READS
+        runIn(10, "wifiRead")
     }
     sendEvent(name: "lastSettingsWrite", value: text)
     runIn(2, "applyPlugSettings")
@@ -715,7 +750,7 @@ private void sendRpc(String method, Map params, String key, value, int attempt =
 /**
  * The plug acknowledged one write of the request: send the next chunk, or after the last one read the
  * reply. One chunk at a time, because the plug joins chunks in the order they arrive and the mesh can
- * reorder frames sent close together: on 2026-10-15 4612 answered chunks sent 150 ms apart with error
+ * reorder frames sent close together: on 2026-10-15 a test plug answered chunks sent 150 ms apart with error
  * -103, the request's id and method intact and its config scrambled. A lost acknowledgement stalls the
  * request until rpcTimeout asks again.
  */
@@ -863,7 +898,7 @@ private void handleRpcChunk(String text) {
 /**
  * Judges what has arrived of the reply. The opening decides: the request id, then "error" or "result".
  * Hubitat hands over 46 of its 50 bytes, so with a one-digit request id it still ends on the r of result
- * or the e of error, right after src (4612's -103 arrived as ...","e), while with a two-digit id it ends
+ * or the e of error, right after src (a test plug's -103 arrived as ...","e), while with a two-digit id it ends
  * on the quote before them (2026-10-15, id 14) and says nothing. Then the plug's reply length tells with
  * the tail: a SetConfig success has exactly one length for this id and plug, anything else is an error.
  * A tail never decides on its own, and never against the opening: a read answered late carries the
@@ -963,7 +998,7 @@ void setWifi(String network, String password = null) {
         wifiOutcome(network, "not sent", "a password has 8 to 63 characters; leave it empty for an open network")
         return
     }
-    // Enable and SSID, as Zigbee2MQTT writes them. Not DHCP: 4613 answered READ_ONLY (0x88) for 0x0003 on
+    // Enable and SSID, as Zigbee2MQTT writes them. Not DHCP: a test plug answered READ_ONLY (0x88) for 0x0003 on
     // 2026-10-15, and the plug uses DHCP unless given a static address.
     List<String> frames = [wifiWrite(boolRecord(0x0004, true) + textRecord(0x0005, name))]
     frames << wifiWrite(textRecord(0x0006, pass))                     // the password; an empty one clears what the plug holds
@@ -1105,7 +1140,7 @@ private void parseWifi(Map descMap) {
             if (device.currentValue("wifiStatus") != v) logInfo "Wi-Fi status: ${v}"
             sendEvent(name: "wifiStatus", value: v)
         } else if (r.attrId == "0001") {
-            boolean known = text && text != "0.0.0.0"                     // 4613 reported 0.0.0.0 while connecting
+            boolean known = text && text != "0.0.0.0"                     // a test plug reported 0.0.0.0 while connecting
             String v = known ? text : "none"
             if (device.currentValue("wifiIp") != v) logInfo "Wi-Fi address: ${v}"
             sendEvent(name: "wifiIp", value: v)
@@ -1237,6 +1272,7 @@ private void handleSwitch(String hex) {
         state.onAtMs = now()
         state.onType = type
         state.peakWatts = 0
+        markTimerStart()
     }
     if (changed && value == "off" && type == "physical") checkTrip()
     sendEvent(name: "switch", value: value, type: type, descriptionText: text)
@@ -1250,25 +1286,69 @@ private void handleSwitch(String hex) {
  * on 2026-10-15 (on, off, on within 1.4 s, nothing plugged in) are a person, not a trip.
  */
 private void checkTrip() {
+    if (timerOff()) return
     Long onAt = state.onAtMs as Long
-    int autoOff = toDecimal(((state.plugSettings ?: [:]) as Map).auto_off).intValue()
-    if (autoOff > 0 && onAt != null && now() - onAt >= autoOff * 1000L - AUTO_OFF_GRACE_MS) {
-        logInfo "switched itself off by its auto-off timer (${autoOff} s after it was switched on)"
-        return
-    }
     BigDecimal peak = toDecimal(state.peakWatts)
     BigDecimal limit = acceptedPowerLimit()
     boolean quick = onAt != null && now() - onAt <= TRIP_WINDOW_MS && (state.onType == "digital" || peak > 0)
     BigDecimal load = tripLoad()
     boolean heavy = load >= limit * TRIP_LOAD_SHARE
-    if (!quick && !heavy) return
-    BigDecimal shown = quick ? peak : load
+    String text = null
+    if (quick || heavy) {
+        BigDecimal shown = quick ? peak : load
+        String when = quick ? "${Math.round((now() - onAt) / 1000.0)} s after it was switched on" : "under load"
+        text = "switched itself off ${when}, at up to ${shown.setScale(0, BigDecimal.ROUND_HALF_UP)} W (limit ${limit} W): likely its overcurrent or overpower protection"
+    } else {
+        text = ampsTrip() ?: voltsTrip()
+    }
+    if (text == null) return
     int count = toDecimal(device.currentValue("tripCount")).intValue() + 1
-    String when = quick ? "${Math.round((now() - onAt) / 1000.0)} s after it was switched on" : "under load"
-    String text = "switched itself off ${when}, at up to ${shown.setScale(0, BigDecimal.ROUND_HALF_UP)} W (limit ${limit} W): likely its overcurrent or overpower protection"
     logWarn "${text}"
     sendEvent(name: "tripCount", value: count, descriptionText: "${device.displayName} ${text}")
     sendEvent(name: "lastTrip", value: text, isStateChange: true)
+}
+
+/**
+ * The plug restarts its auto-off timer on every switch-on, a repeated on included, so the timer is judged from the
+ * latest on the driver knows of (its own command, or a changed on report) and the delay in force at that moment:
+ * a delay accepted later did not start then.
+ */
+private void markTimerStart() {
+    state.timerFromMs = now()
+    state.timerSeconds = toDecimal(confirmedSetting("auto_off")).intValue()
+}
+
+/**
+ * Whether this off is the plug's auto-off timer: the delay recorded at the latest switch-on has run out, within the
+ * grace before it and the trip window after it. An off outside that window is judged as a trip: later, the timer
+ * had fired already or was not running; earlier, something else cut the load. A false trip is the safe side.
+ */
+private boolean timerOff() {
+    Long from = state.timerFromMs as Long
+    int delay = toDecimal(state.timerSeconds).intValue()
+    if (from == null || delay <= 0) return false
+    long ran = now() - from
+    if (ran < delay * 1000L - AUTO_OFF_GRACE_MS || ran > delay * 1000L + TRIP_WINDOW_MS) return false
+    logInfo "switched itself off by its auto-off timer (${delay} s after it was switched on)"
+    return true
+}
+
+/** A trip against the current limit the plug confirmed (or its 15 A), judged on the recent current like the load in watts; null if none. */
+private String ampsTrip() {
+    BigDecimal amps = tripAmps()
+    BigDecimal limit = acceptedCurrentLimit()
+    if (amps < limit * TRIP_LOAD_SHARE) return null
+    return "switched itself off under load, at up to ${amps.setScale(1, BigDecimal.ROUND_HALF_UP)} A (limit ${limit} A): likely its overcurrent protection"
+}
+
+/** A trip against the voltage limit the plug confirmed, from a mains reading of the current reporting period; null if none, or no limit. */
+private String voltsTrip() {
+    BigDecimal limit = acceptedVoltageLimit()
+    Long lastMs = state.lastVoltsMs as Long
+    if (limit == null || lastMs == null || now() - lastMs > powerReadingFreshMs()) return null
+    BigDecimal volts = toDecimal(state.lastVolts)
+    if (volts < limit * TRIP_VOLTS_SHARE) return null
+    return "switched itself off at ${volts.setScale(1, BigDecimal.ROUND_HALF_UP)} V on the mains (limit ${limit} V): likely its overvoltage protection"
 }
 
 /**
@@ -1281,9 +1361,13 @@ private void checkTrip() {
  * stamped later: the newest reading of the current reporting period taken before the on starts the cycle off,
  * as long as the on itself is that recent (the review of 1.4.5).
  */
-private BigDecimal tripLoad() {
-    List readings = (state.watts ?: []) as List
-    if (!readings && state.lastWatts != null) readings = [[state.lastWatts, state.lastWattsMs ?: 0L]]   // 1.4.3 kept one reading
+private BigDecimal tripLoad() { return recentLoad((state.watts ?: []) as List, state.lastWatts, state.lastWattsMs) }
+
+/** The current the plug carried into the off, judged like the load in watts from its current readings (state.amps). */
+private BigDecimal tripAmps() { return recentLoad((state.amps ?: []) as List, state.lastAmps, state.lastAmpsMs) }
+
+private BigDecimal recentLoad(List readings, lastValue, lastMs) {
+    if (!readings && lastValue != null) readings = [[lastValue, lastMs ?: 0L]]   // 1.4.3 kept one power reading, 1.5.0 one current reading
     Long onAt = state.onAtMs as Long
     long graceFrom = now() - TRIP_DROP_GRACE_MS
     long fresh = now() - powerReadingFreshMs()
@@ -1322,9 +1406,10 @@ private void handleMeasurement(String q, String hex, String encoding) {
         state.watts = [[plain, now()]] + ((state.watts ?: []) as List).take(WATTS_HISTORY - 1)
         if (device.currentValue("switch") == "on" && plain > toDecimal(state.peakWatts)) state.peakWatts = plain
     }
-    if (q == "current") {                                                        // the current limit guard goes by these
+    if (q == "current") {                                                        // the current limit guard and a trip under current go by these
         state.lastAmps = plain
         state.lastAmpsMs = now()
+        state.amps = [[plain, now()]] + ((state.amps ?: []) as List).take(WATTS_HISTORY - 1)
     }
     if (q == "voltage") {                                                        // the voltage limit guard goes by these
         state.lastVolts = plain
@@ -1456,10 +1541,15 @@ private void scheduleHousekeeping() {
     if (logEnable) runIn(1800, "logsOff")
 }
 
-/** Up to 1.4.3 the confirmed cutoff lived only under plugSettings, which Configure clears: carry it over once. */
+/**
+ * The settings the plug keeps running lived only under plugSettings up to 1.4.3 (the cutoff) and 1.5.0 (the auto-off
+ * delay, the current and voltage limits), which Configure clears: carry each over once.
+ */
 private void keepConfirmedCutoff() {
-    def limit = ((state.plugSettings ?: [:]) as Map).power_limit
-    if (limit != null && state.cutoffWatts == null) state.cutoffWatts = limit
+    Map done = (state.plugSettings ?: [:]) as Map
+    CUTOFF_KEYS.each { String key, String kept ->
+        if (done[key] != null && state[kept] == null) state[kept] = done[key]
+    }
 }
 
 /** Removes what the 1PM Gen 4 driver left behind; its calibration percentages would now be wrong. */

@@ -22,6 +22,7 @@
  * version 1.1.1 2025-05-19 Joao - Translation to English
  * version 1.2.0 2025-08-21 kkossev - Shelly RPC cluster tests (Hubitat platform have a bug preventing the RPC cluster from working correctly)
  * version 1.2.1 2025-08-22 kkossev - added wifiInfo; added runRpcStateMachine()
+ * version 1.2.1-additionalAttrs 2026-10-11 Chris Busch - reads every attribute of a bundled report (local change, not upstream)
   */
 
 static String version()   { '1.2.1-additionalAttrs' }

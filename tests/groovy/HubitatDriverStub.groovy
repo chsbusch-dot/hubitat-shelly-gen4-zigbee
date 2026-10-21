@@ -171,7 +171,7 @@ class MetadataRecorder {
 /** The driver's `device`: identity, data values, current states, and the settings calls it makes. */
 class FakeDevice {
     String displayName = "Test Plug"
-    String deviceNetworkId = "7257"
+    String deviceNetworkId = "1A2B"
     String endpointId = "01"
     Map<String, String> data = [manufacturer: "Shelly", model: "Plug US", softwareBuild: "020000FF"]
     Map<String, Object> current = [:]
@@ -218,26 +218,26 @@ class FakeZigbee {
     List<String> readAttribute(Integer cluster, List attrs, Map params = [:], int delay = 200) {
         reads << [cluster: cluster, attrs: attrs.collect { it as Integer }, params: params]
         String ids = attrs.collect { String.format("0x%04X", it as Integer) }.join(" ")
-        return ["he rattr 0x7257 0x01 ${String.format('0x%04X', cluster)} ${ids} {}".toString(), "delay ${delay}".toString()]
+        return ["he rattr 0x1A2B 0x01 ${String.format('0x%04X', cluster)} ${ids} {}".toString(), "delay ${delay}".toString()]
     }
 
     List<String> configureReporting(Integer cluster, Integer attr, Integer type, Integer min, Integer max, Integer change = null, Map params = [:], int delay = 200) {
         reporting << [cluster: cluster, attr: attr, type: type, min: min, max: max, change: change, params: params]
         String c = String.format("0x%04X", cluster)
         return [
-            "zdo bind 0x7257 0x01 0x01 ${c} {AABBCCFFFE000001} {}".toString(), "delay ${delay}".toString(),
-            "he cr 0x7257 0x01 ${c} ${String.format('0x%04X', attr)} ${String.format('0x%02X', type)} ${min} ${max} {${change}} {}".toString(), "delay ${delay}".toString(),
+            "zdo bind 0x1A2B 0x01 0x01 ${c} {AABBCCFFFE000001} {}".toString(), "delay ${delay}".toString(),
+            "he cr 0x1A2B 0x01 ${c} ${String.format('0x%04X', attr)} ${String.format('0x%02X', type)} ${min} ${max} {${change}} {}".toString(), "delay ${delay}".toString(),
         ]
     }
 
     List<String> on() {
         switchCommands << "on"
-        return ["he cmd 0x7257 0x01 0x0006 0x01 {}", "delay 200"]
+        return ["he cmd 0x1A2B 0x01 0x0006 0x01 {}", "delay 200"]
     }
 
     List<String> off() {
         switchCommands << "off"
-        return ["he cmd 0x7257 0x01 0x0006 0x00 {}", "delay 200"]
+        return ["he cmd 0x1A2B 0x01 0x0006 0x00 {}", "delay 200"]
     }
 
     List<Map> clusterCommands = []
@@ -245,12 +245,12 @@ class FakeZigbee {
 
     List<String> writeAttribute(Integer cluster, Integer attr, Integer type, Integer value, Map params = [:], int delay = 200) {
         writes << [cluster: cluster, attr: attr, type: type, value: value]
-        return ["he wattr 0x7257 0x01 ${String.format('0x%04X', cluster)} ${String.format('0x%04X', attr)} ${String.format('0x%02X', type)} {${String.format('%02X', value)}}".toString(), "delay 200"]
+        return ["he wattr 0x1A2B 0x01 ${String.format('0x%04X', cluster)} ${String.format('0x%04X', attr)} ${String.format('0x%02X', type)} {${String.format('%02X', value)}}".toString(), "delay 200"]
     }
 
     List<String> command(Integer cluster, Integer cmd, String... payload) {
         clusterCommands << [cluster: cluster, command: cmd, payload: payload.join("")]
-        return ["he cmd 0x7257 0x01 ${String.format('0x%04X', cluster)} ${String.format('0x%02X', cmd)} {${payload.join('')}}".toString(), "delay 200"]
+        return ["he cmd 0x1A2B 0x01 ${String.format('0x%04X', cluster)} ${String.format('0x%02X', cmd)} {${payload.join('')}}".toString(), "delay 200"]
     }
 
 

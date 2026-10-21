@@ -14,7 +14,7 @@ safety relevant.
 | `packageManifest.json` | HPM manifest; version must equal the driver's `driverVersion()` | n/a |
 | `repository.json` | HPM listing (author, one package pointing at the manifest, category, tags); registered in HubitatCommunity/hubitat-packagerepositories | n/a |
 | `README.md` | Public documentation (user-visible: no em/en dashes; no Codex humanizer pass for GitHub READMEs, Chris 2026-10-15) | n/a |
-| `reference/shelly-1pm-gen4-v1.2.1-additionalAttrs.groovy` | Upstream joaomf/kkossev driver as installed on the hub (code 2795) with the 2026-10-11 additionalAttrs patch. Reference only | no |
+| `reference/shelly-1pm-gen4-v1.2.1-additionalAttrs.groovy` | Upstream joaomf/kkossev driver v1.2.1 with the 2026-10-11 additionalAttrs patch (named in its header). Reference only | no |
 | `tests/` | Package check, @Field check, Groovy execution tests, Groovy 2.4 compile, mutation check | n/a |
 
 ## Live hub
@@ -42,10 +42,9 @@ source (`/driver/ajax/code?id=<driver>`) with the branch byte for byte.
 - Device-specific rules (which plug may be switched for a test, which apps hold secrets) are in
   `CLAUDE.local.md`.
 - Debug logging on a live plug only temporarily; it turns itself off after 30 minutes.
-- **This repo is public** (since 2026-10-15; Chris's call). It started as one clean commit; the private
-  development history, with personal data in it, lives in `chsbusch-dot/hubitat-shelly-gen4-zigbee-history`
-  (local remote `history`). Never push a branch that descends from that history here: branch only from
-  `origin/main`. Old local branches push to `history` by config.
+- **This repo is public** (since 2026-10-15; Chris's call). Branch only from `origin/main`, and keep hub
+  ids, device labels, IPs and MACs out of every commit (see Live hub). The tests name their recorded
+  plugs "plug A" and "plug B" and use made-up network ids.
 - **Still always-ask:** the HPM repository listing and any community.hubitat.com post each need Chris's
   explicit yes. Never change repo visibility.
 - README and forum text are public: no em or en dashes. GitHub READMEs skip the Codex humanizer pass

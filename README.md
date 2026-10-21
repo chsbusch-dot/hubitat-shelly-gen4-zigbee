@@ -6,8 +6,9 @@ marks the plug offline when it stops talking.
 
 ## Why another driver
 
-Most people run these plugs on the Shelly 1PM Gen 4 Zigbee driver by joaomf and kkossev. That driver
-was written for the 1PM relay. Switching works, but two things go wrong on the plug:
+Hubitat has no driver of its own for this plug: it pairs as a Generic Zigbee Outlet, and many owners
+move it to the Shelly 1PM Gen 4 Zigbee driver by joaomf and kkossev. That driver was written for the 1PM
+relay. Switching works, but two things go wrong on the plug:
 
 - **Units.** The 1PM driver divides power and current by 100. Plug firmware 020000FF sends power in
   watts and current in milliamps, so a 1000 W heater shows up as 10 W and 9 A as 90 A. Zigbee has
@@ -19,6 +20,25 @@ was written for the 1PM relay. Switching works, but two things go wrong on the p
 
 Configure also leaves the relay alone. Hubitat's built-in Generic Zigbee Outlet driver turns the outlet
 off and on again while it configures, which you don't want on a plug that runs a space heater.
+
+## Safety
+
+This driver switches a relay that may run a heater. Read this before you rely on it.
+
+- The plug's own protection (its overcurrent and overpower cutoffs, and the limits you set) runs inside
+  the plug. The driver only sends the settings and judges afterwards whether an off was the plug
+  protecting itself. It cannot stop the plug from switching, and it cannot switch the plug off while the
+  hub or the Zigbee mesh is down.
+- The auto-off timer is the one safeguard that needs no hub: the plug runs it by itself. It still needs
+  the plug to be working. None of this replaces a heater's own tip-over and overheat protection, or a
+  load that fits the plug (15 A, 1800 W).
+- Trip detection is a judgement from timing and the last readings, not a message from the plug. It can
+  miss a trip, and it can report one that was not. Use `tripCount` to stop a rule from switching the
+  plug back on, not as proof that all is well.
+- The driver never switches the relay on its own. Configure, Refresh, the settings and the Wi-Fi
+  commands leave it alone. Only on, off and your rules move it.
+- A plug that was factory reset is back at its defaults (1800 W, no timer). Save the settings again
+  after one.
 
 ## Requirements
 
@@ -42,10 +62,18 @@ https://raw.githubusercontent.com/chsbusch-dot/hubitat-shelly-gen4-zigbee/main/d
 
 ## Set up a plug
 
+**Zigbee mode.** A plug out of the box is in Wi-Fi mode. In the Shelly app, or on the plug's own web
+page, open its settings, find Zigbee and enable it. The plug then looks for a network: open Devices, Add
+device, Zigbee on the hub, and it joins. If it does not, start the search again from the same Zigbee page
+while the hub is still looking, but not once the hub shows the plug: a plug told to search while it is
+joined leaves the network. One plug in testing only held its Zigbee link with Wi-Fi off, so run
+**wifiOff** (or turn Wi-Fi off in the app) once the plug is paired, unless you need Wi-Fi for a firmware
+update.
+
 **A plug you pair from now on** gets this driver on its own: the fingerprint matches manufacturer
 `Shelly`, model `Plug US`. The hub runs Configure after pairing.
 
-**A plug that is already paired** (on the 1PM driver, for example):
+**A plug that is already paired** (on the 1PM driver or on the Generic Zigbee Outlet, for example):
 
 1. Open the device, set Type to *Shelly Plug US Gen4 (Zigbee)* and click Save Device.
 2. Click Configure. The relay stays as it is.
@@ -68,9 +96,9 @@ Those corrections would make the new readings wrong. The 1PM driver's leftover a
 | AC frequency offset | 0 Hz | Added to every frequency reading. |
 | After a power cut, the plug turns | keep | Off, on, or back to how it was. "Keep" leaves the plug's own setting alone. Pick "on" only if you want a heater to come back by itself. |
 | Switch off above (W) | empty | The plug's own overpower cutoff, 100 to 1800 W. Empty leaves the plug's setting alone. |
-| Switch off by itself after | empty | The plug's auto-off timer: it switches itself off this many seconds after each switch-on, from the hub or from its button. 0 turns the timer off. Empty leaves the plug's setting alone. |
+| Switch off by itself after | empty | The plug's auto-off timer: it switches itself off this many seconds after each switch-on, from the hub or from its button. 0 turns the timer off, 86400 (a day) is the most. Empty leaves the plug's setting alone. |
 | Switch off above (A) | empty | The plug's own overcurrent cutoff, 1 to 15 A. Empty leaves the plug's setting alone. |
-| Switch off above (V) | empty | The plug's own overvoltage cutoff, 100 to 300 V. Empty leaves the plug's setting alone. |
+| Switch off above (V) | empty | The plug's own overvoltage cutoff, 100 to 300 V. A limit within 5% of the last mains reading is held back, since a normal swing would trip it. Empty leaves the plug's setting alone. |
 | LED ring | keep | What the plug's LED shows: a colour that follows the power draw, one colour when on and another when off, or nothing. |
 | LED colour when on, when off | keep | The two colours for the one-colour mode. |
 | LED brightness | empty | 1 to 100 percent. Empty keeps the plug's setting. |
@@ -82,8 +110,10 @@ Saving the settings sends the new reporting setup to the plug. The plug's own se
 the cutoffs, the auto-off timer, LED) go out about 30 seconds later, one at a time, and only when they
 differ from what the plug last accepted (see [Plug settings](#plug-settings)).
 
-The auto-off timer is the setting to use for a heater: with it, a plug that loses contact with the hub still
-switches off by itself. Switching the plug on again starts the timer again.
+The auto-off timer is worth setting for a heater: with it, a plug that loses contact with the hub still
+switches off by itself after the delay. The plug restarts the timer on every switch-on, a repeated on
+included, so a rule that sends on every few minutes keeps the plug on for as long as it runs. The timer
+is the plug's own and needs the plug to be working. It is no substitute for a heater's own safety cutout.
 
 ## Attributes
 
@@ -138,18 +168,29 @@ the plug does not need Wi-Fi any more: one plug in testing kept dropping off Zig
 
 ## Trips
 
-The plug protects itself: above 15 A (1800 W), or above its own power limit, it switches off. When the
-plug turns itself off within ten seconds of the hub switching it on (or of a button press, if it was
-drawing power by then), or while its recent load was at least 90% of the cutoff the plug confirmed (1800 W unless you set one), the driver counts a trip, logs a
-warning and updates `tripCount` and `lastTrip`. The recent load is taken from the plug's power readings
-since it was last switched on: the 0 W it reports once or twice after cutting the load does not hide what it
-carried, and an earlier cycle's load does not count. A steady heater reports its load once, and that report can
-arrive just before the switch-on it belongs to; the newest reading of the current reporting period counts then. A rule
-can watch `tripCount` and stop switching the plug back on. Pressing the plug's button on and off is not a
-trip, and neither is the auto-off timer: an off that arrives when the timer the driver set is due is logged
-as the timer. A timer set outside the driver (in the Shelly app, say) is unknown to it, so its off under a
-heavy load can count as a trip. Configure keeps the cutoff the plug confirmed; a plug that was factory reset
-is back at 1800 W, so save the settings again after one.
+The plug has its own protection: above 15 A (1800 W), or above a power, current or voltage limit you
+set, it switches itself off. The plug does not say why it switched off, so the driver judges from timing
+and the last readings. It counts a trip, logs a warning and updates `tripCount` and `lastTrip` when the
+plug turns itself off:
+
+- within ten seconds of the hub switching it on (or of a button press, if it was drawing power by then),
+- while its recent load was at least 90% of the power cutoff the plug confirmed (1800 W unless you set one),
+- while its recent current was at least 90% of the current limit (15 A unless you set one), or
+- while the mains, as the plug last reported it, was within 2% of the voltage limit you set.
+
+The recent load is taken from the plug's power (or current) readings since it was last switched on: the
+0 W it reports once or twice after cutting the load does not hide what it carried, and an earlier cycle's
+load does not count. A steady heater reports its load once, and that report can arrive just before the
+switch-on it belongs to. The newest reading of the current reporting period counts then. A rule can watch
+`tripCount` and stop switching the plug back on.
+
+Pressing the plug's button on and off is not a trip, and neither is the auto-off timer: an off that
+arrives when the timer is due, a few seconds either way, is logged as the timer. The driver takes the
+timer to start at the latest switch-on it saw (the plug restarts it on every on, a repeated one included)
+with the delay the plug had accepted at that moment. A timer set outside the driver (in the Shelly app,
+say) is unknown to it, so its off under a heavy load can count as a trip. Configure keeps the limits and
+the delay the plug confirmed. A plug that was factory reset is back at its defaults, so save the settings
+again after one.
 
 One plug in testing ran a heater that drew about 2,000 W. It tripped two seconds after every `on`, every
 ten minutes, for hours. If you see trips, the load is too big for the plug.
@@ -163,11 +204,12 @@ replies short, but enough of each reply arrives to tell an accepted setting from
 result shows in `lastSettingsWrite`. A setting that comes back refused or unconfirmed is tried again the
 next time you save the settings.
 
-The driver will not set a cutoff below what the plug is drawing at that moment, since the plug would
-switch off at once. That check runs before every part of the write goes out, and it needs a power (or
-current, or voltage) reading from the current reporting period, taken since the plug was last switched on;
-otherwise the write waits for a Refresh and the next save. A setting you change while an earlier write is
-still out is sent on its own; the earlier write is dropped.
+The driver will not send a power or current cutoff that the plug's last reported draw already reaches
+90% of, nor a voltage limit within 5% of the last mains reading, since the plug would switch off at once
+or on the next swing. That check runs before every part of the write goes out, and it needs a power (or current,
+or voltage) reading from the current reporting period, taken since the plug was last switched on.
+Otherwise the write waits for a Refresh and the next save. A setting you change while an earlier write
+is still out is sent on its own, and the earlier write is dropped.
 
 ## Reporting
 
@@ -218,7 +260,7 @@ names the missing attributes:
 | Energy | 1 mWh |
 
 If a reading then looks 10 or 100 times off, run Configure again. If that does not fix it, use the
-adjustment settings and please open an issue with the plug's firmware (the `softwareBuild` and
+adjustment settings and please open an issue (see Help below) with the plug's firmware (the `softwareBuild` and
 `firmwareMT` data values) and the log lines from Configure.
 
 ## Not supported
@@ -227,6 +269,12 @@ adjustment settings and please open an issue with the plug's firmware (the `soft
   every reading comes from standard Zigbee.
 - **Other Shelly Gen4 plugs.** Only the Plug US is tested. The Power Strip 4 Gen4 has four outlets and
   needs a different driver.
+
+## Help
+
+Questions and bug reports: [open an issue](https://github.com/chsbusch-dot/hubitat-shelly-gen4-zigbee/issues) on GitHub. For a
+wrong reading, include the plug's firmware (the `softwareBuild` and `firmwareMT` data values) and the log
+lines from Configure.
 
 ## Credits
 
