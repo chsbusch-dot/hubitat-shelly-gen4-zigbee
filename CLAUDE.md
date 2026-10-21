@@ -41,8 +41,12 @@ source (`/driver/ajax/code?id=<driver>`) with the branch byte for byte.
 - Device-specific rules (which plug may be switched for a test, which apps hold secrets) are in
   `CLAUDE.local.md`.
 - Debug logging on a live plug only temporarily; it turns itself off after 30 minutes.
-- **Publishing is always-ask:** creating or making public the GitHub repo, the HPM repository listing,
-  and any community.hubitat.com post each need Chris's explicit yes. Never change repo visibility.
+- **This repo is public** (since 2026-10-15; Chris's call). It started as one clean commit; the private
+  development history, with personal data in it, lives in `chsbusch-dot/hubitat-shelly-gen4-zigbee-history`
+  (local remote `history`). Never push a branch that descends from that history here: branch only from
+  `origin/main`. Old local branches push to `history` by config.
+- **Still always-ask:** the HPM repository listing and any community.hubitat.com post each need Chris's
+  explicit yes. Never change repo visibility.
 - README and forum text are public: no em or en dashes. GitHub READMEs skip the Codex humanizer pass
   (Chris, 2026-10-15); a forum post still gets it, with per-call approval from Chris.
 
