@@ -2,9 +2,12 @@
 
 Hubitat Elevation driver for the Shelly Plug US Gen4 (S4PL-00116US) in Zigbee mode, shipped as a
 Hubitat Package Manager package (`packageManifest.json`). It replaces the Shelly 1PM Gen 4 driver on
-Chris's plugs: it scales readings with the plug's own multiplier/divisor attributes and reads every
-attribute of a bundled report. The plugs run space heaters: treat anything that switches the relay as
-safety relevant.
+this plug: it scales readings with the plug's own multiplier/divisor attributes and reads every
+attribute of a bundled report. The plugs it was written for run space heaters: treat anything that
+switches the relay as safety relevant.
+
+Maintainer-only notes (the live hub, deployment, publishing) live in a git-ignored `CLAUDE.local.md`,
+which Claude Code loads next to this file. Nothing in this repo needs a hub or a plug.
 
 ## Layout
 
@@ -13,42 +16,20 @@ safety relevant.
 | `drivers/Shelly-Plug-US-Gen4-Zigbee.groovy` | The driver | yes |
 | `packageManifest.json` | HPM manifest; version must equal the driver's `driverVersion()` | n/a |
 | `repository.json` | HPM listing (author, one package pointing at the manifest, category, tags); registered in HubitatCommunity/hubitat-packagerepositories | n/a |
-| `README.md` | Public documentation (user-visible: no em/en dashes; no Codex humanizer pass for GitHub READMEs, Chris 2026-10-15) | n/a |
+| `README.md` | Public documentation (user-visible: no em or en dashes) | n/a |
 | `reference/shelly-1pm-gen4-v1.2.1-additionalAttrs.groovy` | Upstream joaomf/kkossev driver v1.2.1 with the 2026-10-11 additionalAttrs patch (named in its header). Reference only | no |
 | `tests/` | Package check, @Field check, Groovy execution tests, Groovy 2.4 compile, mutation check | n/a |
-
-## Live hub
-
-The hub's addresses, device and app ids, device labels and rule names are kept OUT of this public
-repo, in `CLAUDE.local.md` (git-ignored; Claude Code loads it next to this file) and in the session
-memory. Read it before touching the hub. Never commit it, and never put a person's name, a device
-label, an IP or a MAC into tests, docs or commit messages: tests use the neutral label "Test Plug" and
-a made-up MAC.
-
-Hub access is the `hubitat-rules` MCP server; gateway tools (`hub_read_*`, `hub_manage_*`) list their
-sub-tools when called with no arguments. Write tools need the `bestPracticeKey` of their guide section
-(`hub_get_tool_guide(section=...)`), which rotates hourly: read it fresh, never hard-code it.
-
-Uploading driver code: curl the file to the hub's `/hub/fileManager/upload` (form fields `uploadFile`,
-`folder=/`), check the served bytes (`/local/<file>`) by sha256, then `hub_create_driver` /
-`hub_update_driver` with `sourceFile` (plus `expectedVersion` on an update), and compare the hub's
-source (`/driver/ajax/code?id=<driver>`) with the branch byte for byte.
 
 ## Safety rules (hard)
 
 - **Configure must never switch the relay.** The Generic Zigbee Outlet's off/on "options testing" is
   exactly what this driver exists to avoid. The suite checks it (`configure: ... never switches the
   relay`, mutant M03).
-- Device-specific rules (which plug may be switched for a test, which apps hold secrets) are in
-  `CLAUDE.local.md`.
 - Debug logging on a live plug only temporarily; it turns itself off after 30 minutes.
-- **This repo is public** (since 2026-10-15; Chris's call). Branch only from `origin/main`, and keep hub
-  ids, device labels, IPs and MACs out of every commit (see Live hub). The tests name their recorded
-  plugs "plug A" and "plug B" and use made-up network ids.
-- **Still always-ask:** the HPM repository listing and any community.hubitat.com post each need Chris's
-  explicit yes. Never change repo visibility.
-- README and forum text are public: no em or en dashes. GitHub READMEs skip the Codex humanizer pass
-  (Chris, 2026-10-15); a forum post still gets it, with per-call approval from Chris.
+- Keep real installations out of the repo: no hub or device ids, device labels, IP or MAC addresses, or
+  people's names in tests, docs or commit messages. The tests name their recorded plugs "plug A" and
+  "plug B", use the label "Test Plug" and made-up network ids.
+- README and every other user-visible text: no em or en dashes (`tests/check_package.py` checks).
 
 ## Tests
 
@@ -80,9 +61,11 @@ power factor). The unmutated `base` must pass and every mutant must fail. Anchor
 
 ## Branches and PRs
 
-- Branch off `main` as `shelly/<type>/<slug>` (for example `shelly/fix/energy-divisor`).
-- One feature per branch; never commit onto another feature's open-PR branch.
-- PR body carries `Closes WOR-<n>` (Linear team WOR).
+- Branch off `origin/main` as `shelly/<type>/<slug>` (for example `shelly/fix/energy-divisor`).
+- One feature per branch; never commit onto another feature's open-PR branch, and never stack a PR on
+  another open PR's branch.
+- Maintainer PRs carry `Closes WOR-<n>` (Linear team WOR) in the body; an outside contribution needs
+  no ticket, a clear description is enough.
 - A release bumps `driverVersion()`, the driver's header changelog, and `version`, `dateReleased` and
   `releaseNotes` (starting `<version> - `) in `packageManifest.json`. `tests/check_package.py` enforces
   that they agree.
