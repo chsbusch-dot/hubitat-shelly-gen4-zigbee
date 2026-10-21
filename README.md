@@ -131,8 +131,10 @@ Refresh afterwards: the driver sees the new firmware and reads the plug's units 
 The plug protects itself: above 15 A (1800 W), or above its own power limit, it switches off. When the
 plug turns itself off within ten seconds of the hub switching it on (or of a button press, if it was
 drawing power by then), or while its recent load was at least 90% of the cutoff the plug confirmed (1800 W unless you set one), the driver counts a trip, logs a
-warning and updates `tripCount` and `lastTrip`. The recent load is taken from the plug's last few power
-readings: the 0 W it reports once or twice after cutting the load does not hide what it carried. A rule
+warning and updates `tripCount` and `lastTrip`. The recent load is taken from the plug's power readings
+since it was last switched on: the 0 W it reports once or twice after cutting the load does not hide what it
+carried, and an earlier cycle's load does not count. A steady heater reports its load once, and that report can
+arrive just before the switch-on it belongs to; the newest reading of the current reporting period counts then. A rule
 can watch `tripCount` and stop switching the plug back on. Pressing the plug's button on and off is not a
 trip. Configure keeps the cutoff the plug confirmed; a plug that was factory reset is back at 1800 W, so
 save the settings again after one.
