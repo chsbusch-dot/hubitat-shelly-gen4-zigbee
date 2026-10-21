@@ -67,7 +67,10 @@ Those corrections would make the new readings wrong. The 1PM driver's leftover a
 | Power, voltage, current adjustment | 0 % | Leave at 0 unless your readings are off against a meter you trust. 2 reads 2% higher. |
 | AC frequency offset | 0 Hz | Added to every frequency reading. |
 | After a power cut, the plug turns | keep | Off, on, or back to how it was. "Keep" leaves the plug's own setting alone. Pick "on" only if you want a heater to come back by itself. |
-| Switch off above | empty | The plug's own overpower cutoff, 100 to 1800 W. Empty leaves the plug's setting alone. |
+| Switch off above (W) | empty | The plug's own overpower cutoff, 100 to 1800 W. Empty leaves the plug's setting alone. |
+| Switch off by itself after | empty | The plug's auto-off timer: it switches itself off this many seconds after each switch-on, from the hub or from its button. 0 turns the timer off. Empty leaves the plug's setting alone. |
+| Switch off above (A) | empty | The plug's own overcurrent cutoff, 1 to 15 A. Empty leaves the plug's setting alone. |
+| Switch off above (V) | empty | The plug's own overvoltage cutoff, 100 to 300 V. Empty leaves the plug's setting alone. |
 | LED ring | keep | What the plug's LED shows: a colour that follows the power draw, one colour when on and another when off, or nothing. |
 | LED colour when on, when off | keep | The two colours for the one-colour mode. |
 | LED brightness | empty | 1 to 100 percent. Empty keeps the plug's setting. |
@@ -76,8 +79,11 @@ Those corrections would make the new readings wrong. The 1PM driver's leftover a
 | Debug logging | off | Raw Zigbee messages. Turns itself off after 30 minutes. |
 
 Saving the settings sends the new reporting setup to the plug. The plug's own settings (power-on state,
-cutoff, LED) go out about 30 seconds later, one at a time, and only when they differ from what the plug
-last accepted (see [Plug settings](#plug-settings)).
+the cutoffs, the auto-off timer, LED) go out about 30 seconds later, one at a time, and only when they
+differ from what the plug last accepted (see [Plug settings](#plug-settings)).
+
+The auto-off timer is the setting to use for a heater: with it, a plug that loses contact with the hub still
+switches off by itself. Switching the plug on again starts the timer again.
 
 ## Attributes
 
@@ -115,6 +121,9 @@ Besides on, off, refresh and configure:
   password goes to the plug only; the driver does not log it or keep it. Each of the three writes has
   30 seconds to be acknowledged. The outcome shows in `lastSettingsWrite`, then `wifiStatus` and `wifiIp`
   show whether the plug joined.
+- **wifiOff** turns the plug's Wi-Fi off again, for example after a firmware update. The plug keeps the
+  network name and password, so a later setWifi with the same values turns it back on. The outcome shows in
+  `lastSettingsWrite`, then `wifiStatus` and `wifiIp` show the change.
 
 None of them touches the relay.
 
@@ -124,7 +133,8 @@ The plug fetches firmware over Wi-Fi, also in Zigbee mode; Hubitat cannot update
 a network with **setWifi** (or with the Shelly app over Bluetooth), wait until `wifiIp` shows an address,
 then update it from the Shelly app or from the plug's own web page at that address. The update restarts
 the plug, and it comes back as set under power-on state (see [Plug settings](#plug-settings)). Press
-Refresh afterwards: the driver sees the new firmware and reads the plug's units again.
+Refresh afterwards: the driver sees the new firmware and reads the plug's units again. Run **wifiOff** when
+the plug does not need Wi-Fi any more: one plug in testing kept dropping off Zigbee while its Wi-Fi was on.
 
 ## Trips
 
@@ -136,26 +146,28 @@ since it was last switched on: the 0 W it reports once or twice after cutting th
 carried, and an earlier cycle's load does not count. A steady heater reports its load once, and that report can
 arrive just before the switch-on it belongs to; the newest reading of the current reporting period counts then. A rule
 can watch `tripCount` and stop switching the plug back on. Pressing the plug's button on and off is not a
-trip. Configure keeps the cutoff the plug confirmed; a plug that was factory reset is back at 1800 W, so
-save the settings again after one.
+trip, and neither is the auto-off timer: an off that arrives when the timer the driver set is due is logged
+as the timer. A timer set outside the driver (in the Shelly app, say) is unknown to it, so its off under a
+heavy load can count as a trip. Configure keeps the cutoff the plug confirmed; a plug that was factory reset
+is back at 1800 W, so save the settings again after one.
 
 One plug in testing ran a heater that drew about 2,000 W. It tripped two seconds after every `on`, every
 ten minutes, for hours. If you see trips, the load is too big for the plug.
 
 ## Plug settings
 
-Three groups of settings live in the plug, not in the hub: what it does after a power cut, its overpower
-cutoff, and its LED ring. The driver sends them through Shelly's own channel over Zigbee (or, for the power-on state, the
+Four groups of settings live in the plug, not in the hub: what it does after a power cut, its cutoffs
+(power, current, voltage), its auto-off timer, and its LED ring. The driver sends them through Shelly's own channel over Zigbee (or, for the power-on state, the
 standard Zigbee attribute when the plug offers it; firmware 2.0.1 does not). Hubitat cuts the plug's
 replies short, but enough of each reply arrives to tell an accepted setting from a refused one; the
 result shows in `lastSettingsWrite`. A setting that comes back refused or unconfirmed is tried again the
 next time you save the settings.
 
 The driver will not set a cutoff below what the plug is drawing at that moment, since the plug would
-switch off at once. That check runs before every part of the write goes out, and it needs a power reading
-from the current reporting period, taken since the plug was last switched on; otherwise the write waits
-for a Refresh and the next save. A setting you change while an earlier write is still out is sent on its
-own; the earlier write is dropped.
+switch off at once. That check runs before every part of the write goes out, and it needs a power (or
+current, or voltage) reading from the current reporting period, taken since the plug was last switched on;
+otherwise the write waits for a Refresh and the next save. A setting you change while an earlier write is
+still out is sent on its own; the earlier write is dropped.
 
 ## Reporting
 
@@ -192,6 +204,7 @@ The plugs tested so far report these units:
 |---|---|---|---|---|---|
 | 2.0.0, 1490-1852-020000FF | 0.01 V | 1 mA | 1 W | 0.01 Hz | 1 mWh |
 | 2.0.1, 1490-1852-020001FF | 0.01 V | 1 mA | 1 W | 0.01 Hz | 1 mWh |
+| 2.2.0-beta1, 1490-1852-02020021 | 0.01 V | 1 mA | 1 W | 0.01 Hz | 1 mWh |
 
 If the plug does not answer for one of them, the driver uses the same units and logs a warning that
 names the missing attributes:
@@ -212,7 +225,6 @@ adjustment settings and please open an issue with the plug's firmware (the `soft
 
 - **Readings over Shelly's own channel.** Hubitat cuts its replies short, so only plug settings use it;
   every reading comes from standard Zigbee.
-- **LED settings.** Use the Shelly app for those.
 - **Other Shelly Gen4 plugs.** Only the Plug US is tested. The Power Strip 4 Gen4 has four outlets and
   needs a different driver.
 
