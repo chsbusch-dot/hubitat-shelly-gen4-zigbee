@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Check that packageManifest.json and the driver agree, and that user-visible text has no dashes.
+"""Check that packageManifest.json, repository.json and the driver agree, and that user-visible text has no dashes.
 
 HPM installs what the manifest names, so a version, name or path that drifts from the driver ships a
-package that installs the wrong thing or reports the wrong version. And Chris's rule for anything a user
+package that installs the wrong thing or reports the wrong version. The HPM listing (repository.json)
+must point at that manifest with a category and tags HPM knows. And Chris's rule for anything a user
 reads: no em or en dashes (README, the manifest's release notes, the driver's titles and log lines).
 
     python3 tests/check_package.py
@@ -23,7 +24,17 @@ RAW_PREFIX = "https://raw.githubusercontent.com/chsbusch-dot/hubitat-shelly-gen4
 REQUIRED = ["packageName", "author", "version", "minimumHEVersion", "dateReleased", "documentationLink",
             "communityLink", "licenseFile", "releaseNotes", "drivers"]
 DASHES = re.compile("[–—]")
-USER_VISIBLE = ["README.md", "packageManifest.json", "NOTICE", *sorted(p.relative_to(ROOT).as_posix() for p in ROOT.glob("drivers/*.groovy"))]
+# HPM's categories and tags (HubitatCommunity/hubitat-packagerepositories, settings.json, 2026-10-21).
+HPM_CATEGORIES = ["Control", "Convenience", "Integrations", "Notifications", "Security", "Utility"]
+HPM_TAGS = ["Alarm Systems", "Appliances", "Automations & Groups", "Bathroom", "Buttons", "Cameras",
+            "Cleaning Devices", "Climate Control", "Cloud", "Dashboards", "Doors & Windows", "Energy Monitoring",
+            "Garage Doors", "HDMI", "Health & Fitness", "IR & RF", "Irrigation", "KVM", "LAN", "Lights & Switches",
+            "Locks", "Matter", "Misc. Devices", "Monitoring", "Motion Control", "MQTT", "Multimedia",
+            "Multi Sensors", "Notifications", "Pets & Animals", "Pools & Spas", "Presence & Location", "Relays",
+            "Repeaters & Extenders", "Safety & Security", "Scales", "Shower", "Sleep", "Speakers", "Tasmota",
+            "Temperature & Humidity", "Timers", "Tools & Utilities", "Valves", "Vehicles & Transportation",
+            "Voice Assistants", "Water Heater", "Water", "Weather", "Window Coverings", "Zigbee", "ZWave"]
+USER_VISIBLE = ["README.md", "packageManifest.json", "repository.json", "NOTICE", *sorted(p.relative_to(ROOT).as_posix() for p in ROOT.glob("drivers/*.groovy"))]
 
 
 def problems() -> list[str]:
@@ -76,6 +87,33 @@ def problems() -> list[str]:
         out.append("manifest: duplicate driver ids")
     if not manifest.get("drivers"):
         out.append("manifest: no drivers")
+
+    listing = json.loads((ROOT / "repository.json").read_text())
+    if listing.get("author") != manifest.get("author"):
+        out.append(f"listing: author {listing.get('author')!r} differs from the manifest's {manifest.get('author')!r}")
+    if not str(listing.get("gitHubUrl", "")).startswith("https://github.com/chsbusch-dot"):
+        out.append(f"listing: gitHubUrl {listing.get('gitHubUrl')!r} is not under github.com/chsbusch-dot")
+    packages = listing.get("packages") or []
+    if len(packages) != 1:
+        out.append(f"listing: expected one package, found {len(packages)}")
+    for pkg in packages:
+        try:
+            uuid.UUID(str(pkg.get("id")))
+        except ValueError:
+            out.append(f"listing: package id {pkg.get('id')!r} is not a UUID")
+        if pkg.get("name") != manifest.get("packageName"):
+            out.append(f"listing: package name {pkg.get('name')!r} differs from the manifest's {manifest.get('packageName')!r}")
+        if pkg.get("location") != RAW_PREFIX + "packageManifest.json":
+            out.append(f"listing: location {pkg.get('location')!r} is not the manifest's raw URL on main")
+        if pkg.get("category") not in HPM_CATEGORIES:
+            out.append(f"listing: category {pkg.get('category')!r} is not one HPM knows")
+        if not str(pkg.get("description", "")).strip():
+            out.append("listing: empty description")
+        for tag in pkg.get("tags") or []:
+            if tag not in HPM_TAGS:
+                out.append(f"listing: tag {tag!r} is not one HPM knows")
+        if not pkg.get("tags"):
+            out.append("listing: no tags")
 
     for name in USER_VISIBLE:
         path = ROOT / name
